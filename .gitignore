@@ -1,0 +1,35 @@
+﻿# Ambiente virtual
+venv/
+env/
+.venv/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribuição / build
+build/
+dist/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Segredos e config local
+.env
+*.local
+
+# Banco de dados local
+*.db
+*.sqlite
+*.sqlite3
+
+# Faturas (dados sensíveis!)
+faturas/
+*.pdf
