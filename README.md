@@ -43,3 +43,57 @@ python backend/main.py
 ## Autor
 
 Gabriel de Oliveira Silva — [GOS-briel](https://github.com/GOS-briel)
+
+---
+
+## 📌 Marcador de retomada (atualizado em 2026-10-15)
+
+Esta seção serve para retomar o projeto rapidamente em sessões futuras sem reexplicar contexto.
+
+### Status atual
+
+**Backend — parcialmente completo:**
+- ✅ Parser Bradesco funcional (extração + parcelas)
+- ✅ API Flask com endpoint POST /fatura/importar
+- ❌ Persistência SQLite (próxima etapa)
+- ❌ CRUDs de lançamentos/categorias/tetos
+- ❌ Categorização automática por aprendizado
+
+**Frontend — não iniciado:**
+- 4 telas definidas em mockups (Dashboard, Registrar, Histórico, Importar)
+- Não existe código ainda
+
+### Decisões já tomadas
+
+Ver DECISOES.md:
+- ADR-001: SQLite no backend
+- ADR-002: Data de parcela = mês da fatura
+- ADR-003: Transações internacionais adiadas
+
+### Próxima etapa — Etapa 5
+
+Criar o modelo de dados SQLite com tabelas:
+- categorias (8 macro fixas + subcategorias customizáveis)
+- tetos (orçamento mensal por categoria)
+- lancamentos (dados extraídos ou registrados manualmente)
+- aprendizados (dicionário interno para categorização automática)
+
+### Pendências técnicas identificadas
+
+A serem endereçadas em etapas futuras:
+- MAX_CONTENT_LENGTH (limitar tamanho de upload)
+- CORS (para o frontend consumir a API)
+- Persistência no SQLite (etapa 5)
+
+### Ambientes de desenvolvimento
+
+- Máquina principal: `D:\financas-app` (Python 3.13.15)
+- Máquina trabalho: `C:\Users\br0098346777\Documents\Finan-as-app` (Python 3.14)
+- Ambas sincronizadas via GitHub — sempre `git pull` antes de nova sessão
+
+### Fatura de referência para testes
+
+Fatura Bradesco de 10/10/2026, utilizada para validar o parser:
+- 23 lançamentos extraídos
+- Total de despesas: R$ 1.699,21
+- 6 lançamentos parcelados identificados corretamente
