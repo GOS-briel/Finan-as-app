@@ -3,7 +3,8 @@
 # Extrai os lançamentos (despesas) do PDF da fatura Bradesco e
 # devolve uma lista estruturada. Pagamentos/créditos são ignorados.
 #
-# Ainda não trata parcelas nem transações internacionais.
+# Parcelas são identificadas, mas a data e o valor continuam sendo os
+# do mês da fatura (ADR-002). Ainda não trata transações internacionais.
 
 import re
 import sys
@@ -14,6 +15,8 @@ import pdfplumber
 RE_LINHA_LANCAMENTO = re.compile(r"\d{2}/\d{2} ")
 # Valor no fim da linha, ex: "1.940,44" ou "1.940,44-" (pagamento/crédito)
 RE_VALOR = re.compile(r"(\d[\d.]*,\d{2})(-?)\s*$")
+# Parcela "DD/DD" na descrição, pode vir colada no nome (ex: "PLAZA05/06")
+RE_PARCELA = re.compile(r"(?<!\d)(\d{2})/(\d{2})(?!\d)")
 
 
 def _converter_valor(texto: str) -> float:
@@ -21,10 +24,29 @@ def _converter_valor(texto: str) -> float:
     return float(texto.replace(".", "").replace(",", "."))
 
 
+def _detectar_parcela(descricao: str) -> tuple[str, int | None, int | None]:
+    """
+    Procura "DD/DD" na descrição. Se for parcela, devolve a descrição sem
+    o "DD/DD" e com " - Parcela X/Y" no final, mais (atual, total).
+    Se não for, devolve a descrição original e (None, None).
+    """
+    achado = RE_PARCELA.search(descricao)
+    if achado is None:
+        return descricao, None, None
+    atual, total = int(achado.group(1)), int(achado.group(2))
+    if not 1 <= atual <= total:
+        return descricao, None, None  # ex: uma data no meio do nome, não parcela
+    sem_parcela = descricao[:achado.start()] + " " + descricao[achado.end():]
+    sem_parcela = " ".join(sem_parcela.split())
+    return f"{sem_parcela} - Parcela {atual}/{total}", atual, total
+
+
 def extrair_lancamentos(pdf_path: str) -> list[dict]:
     """
     Lê a fatura Bradesco e retorna a lista de despesas, cada uma como
-    {"data": "DD/MM", "descricao": str, "valor": float}.
+    {"data": "DD/MM", "descricao": str, "valor": float,
+     "parcela_atual": int | None, "parcela_total": int | None}.
+    Não parcelados têm os campos de parcela como None.
     """
     with pdfplumber.open(pdf_path) as pdf:
         texto_completo = ""
@@ -42,10 +64,15 @@ def extrair_lancamentos(pdf_path: str) -> list[dict]:
             continue  # linha com data mas sem valor no fim (ex: descrição quebrada)
         if achado.group(2) == "-":
             continue  # é pagamento/crédito, não entra na lista
+        descricao, parcela_atual, parcela_total = _detectar_parcela(
+            linha[6:achado.start()].strip()
+        )
         lancamentos.append({
             "data": linha[:5],
-            "descricao": linha[6:achado.start()].strip(),
+            "descricao": descricao,
             "valor": _converter_valor(achado.group(1)),
+            "parcela_atual": parcela_atual,
+            "parcela_total": parcela_total,
         })
     return lancamentos
 
@@ -58,8 +85,15 @@ if __name__ == "__main__":
 
     lancamentos = extrair_lancamentos(sys.argv[1])
 
+    parcelados = [item for item in lancamentos if item["parcela_total"] is not None]
+
     print(f"Lançamentos extraídos: {len(lancamentos)}")
-    for item in lancamentos[:5]:
-        print(f"{item['data']} | {item['descricao']} | R$ {item['valor']:.2f}")
+    print(f"Parcelados: {len(parcelados)}")
+    print(f"Não parcelados: {len(lancamentos) - len(parcelados)}")
+    for item in parcelados[:5]:
+        print(
+            f"{item['data']} | {item['descricao']} | R$ {item['valor']:.2f} | "
+            f"{item['parcela_atual']}/{item['parcela_total']}"
+        )
     total = sum(item["valor"] for item in lancamentos)
     print(f"Total: R$ {total:.2f}")
