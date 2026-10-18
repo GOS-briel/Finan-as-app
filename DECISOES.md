@@ -404,6 +404,87 @@ A comparação das parcelas usa `IS` em vez de `=`: em SQL, `NULL = NULL` não �
 
 ---
 
+## ADR-011 — Design dos endpoints CRUD de categorias
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+A Etapa 6 expõe categorias e subcategorias via API para o frontend. Três questões de design precisavam de resposta: como entregar a hierarquia macro → sub, o que fazer ao deletar uma subcategoria em uso, e se macro podem ser deletadas.
+
+### Decisões
+
+**1. `GET /categorias/macro` devolve cada macro com as subcategorias embutidas.**
+Uma única resposta com a árvore inteira (8 macro + suas subs), em vez de um endpoint para macro e outro para subs.
+
+**2. DELETE de subcategoria em uso é bloqueado (409), nunca em cascata nem SET NULL.**
+Se houver lançamentos ou aprendizados vinculados, a resposta informa as duas contagens (`lancamentos_vinculados`, `aprendizados_vinculados`) e nada é apagado.
+
+**3. Não existe DELETE de categoria macro.**
+Macro são fixas (ADR-005). A remoção excepcional foi movida para a Etapa de Admin pós-v1 (ver BACKLOG.md).
+
+### Justificativa
+
+1. **Embutir:** o volume é minúsculo (8 macro + poucas dezenas de subs), e toda tela que mostra categorias precisa das duas camadas juntas. Uma requisição só = menos round-trips e frontend mais simples.
+2. **Bloquear:** princípio "nada é deletado silenciosamente". Cascata apagaria gastos reais; SET NULL "descategorizaria" lançamentos sem aviso, distorcendo o dashboard. O 409 com contagem deixa o usuário decidir (recategorizar antes, ou desistir).
+3. **Sem DELETE de macro:** remover uma macro afeta tetos, subs e lançamentos em cadeia. Exige confirmação, auditoria e autenticação — escopo de uma etapa própria.
+
+### Trade-offs aceitos
+
+- Para apagar uma subcategoria em uso, o usuário precisa recategorizar os lançamentos antes (não há "mover tudo para X" nesta etapa).
+- Se o número de subs crescer muito, a resposta embutida fica maior — irrelevante na escala de um app pessoal.
+
+### Reabrir se:
+
+- Usuário pedir "apagar e mover lançamentos para outra subcategoria" (endpoint de merge).
+- A Etapa de Admin for iniciada (DELETE de macro).
+
+---
+
+## ADR-012 — Consistência de nomes e ordenação de subcategorias
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+Três detalhes finos apareceram ao planejar o CRUD de subcategorias, todos com impacto direto na qualidade dos dados e na experiência de uso:
+
+1. O `UNIQUE (nome, categoria_macro_id)` do SQLite diferencia maiúsculas/minúsculas: "Delivery" e "delivery" passariam como subcategorias distintas.
+2. A tabela `aprendizados` também referencia `subcategorias` (com `NOT NULL`). Deletar uma sub com aprendizados geraria erro de foreign key (500).
+3. O `ORDER BY nome` do SQLite compara bytes: "Água" vai depois de "Zoológico", e minúsculas depois de todas as maiúsculas.
+
+### Decisões
+
+**1. Duplicata detectada sem diferenciar maiúsculas/minúsculas, no Python (`casefold()`).**
+Antes de inserir ou renomear, o nome é comparado (normalizado em NFC + `casefold()`) com as subs da mesma macro. "AÇAÍ" colide com "açaí". O UNIQUE do schema continua como rede de segurança para o nome exato. Renomear uma sub para o próprio nome com outra capitalização é permitido.
+
+**2. Aprendizados vinculados também bloqueiam o DELETE (409).**
+Mesma regra dos lançamentos (ADR-011). A resposta traz `aprendizados_vinculados` — sempre 0 até a Etapa 9, mas o código já está pronto.
+
+**3. Subcategorias ordenadas no Python, sem acento e sem diferenciar maiúsculas.**
+Chave de ordenação: decomposição Unicode (NFKD), remoção dos acentos, `casefold()`. Resultado: `açaí, Água, bar, Delivery, Restaurante, Zoológico`.
+
+### Justificativa
+
+1. **casefold no Python e não `COLLATE NOCASE`:** o NOCASE do SQLite só trata letras ASCII — "AÇAÍ" e "açaí" continuariam diferentes. Para um app em português, isso anula o propósito.
+2. **Bloquear por aprendizados:** consistência com "nada é deletado silenciosamente" e evita um 500 por violação de foreign key.
+3. **Ordenação natural:** listas são a interface principal de escolha de categoria; ordem errada degrada o app inteiro.
+
+### Trade-offs aceitos
+
+- A checagem de duplicata lê as subs da macro a cada inserção (custo irrelevante: poucas dezenas de linhas).
+- Nomes que diferem só por acento ("Acai" vs "Açaí") **são** considerados diferentes na duplicata (só a ordenação ignora acentos).
+- Ordenar no Python impede paginar/ordenar via SQL — irrelevante neste volume.
+
+### Reabrir se:
+
+- Usuário criar duplicatas "por acento" na prática (considerar ignorar acentos também na duplicata).
+- O volume de subcategorias crescer a ponto de exigir paginação.
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.

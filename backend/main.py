@@ -3,7 +3,7 @@ import tempfile
 
 from flask import Flask, jsonify, request
 
-from app.db import inicializar
+from app.db import categorias, inicializar
 from app.db.lancamentos import salvar_lancamentos_fatura
 from app.fatura.leitor import (
     extrair_competencia,
@@ -12,6 +12,12 @@ from app.fatura.leitor import (
 )
 
 app = Flask(__name__)
+
+
+@app.before_request
+def garantir_banco():
+    if not inicializar.CAMINHO_BANCO.exists():
+        inicializar.main()
 
 
 @app.route("/")
@@ -74,8 +80,6 @@ def importar_fatura():
             "pedir_do_usuario": True,
         }), 422
 
-    if not inicializar.CAMINHO_BANCO.exists():
-        inicializar.main()
     try:
         salvos = salvar_lancamentos_fatura(
             lancamentos, competencia["mes"], competencia["ano"]
@@ -100,6 +104,91 @@ def importar_fatura():
         ),
         "lancamentos": salvos,
     })
+
+
+def _dados_da_requisicao():
+    """Corpo da requisição em JSON ou formulário."""
+    dados = request.get_json(silent=True)
+    return dados if isinstance(dados, dict) else request.form
+
+
+def _validar_nome(valor) -> str:
+    if not isinstance(valor, str):
+        raise ValueError("nome deve ser texto")
+    nome = valor.strip()
+    if not nome:
+        raise ValueError("nome nao pode ser vazio")
+    if len(nome) > 50:
+        raise ValueError("nome deve ter no maximo 50 caracteres")
+    return nome
+
+
+def _validar_macro_id(valor) -> int:
+    # bool é subclasse de int em Python: sem isso, true viraria 1
+    if isinstance(valor, bool) or not isinstance(valor, (int, str)):
+        raise ValueError("categoria_macro_id deve ser inteiro")
+    try:
+        return int(valor)
+    except ValueError:
+        raise ValueError("categoria_macro_id deve ser inteiro") from None
+
+
+ERRO_NOME_DUPLICADO = "ja existe uma subcategoria com esse nome nesta categoria"
+
+
+@app.route("/categorias/macro")
+def listar_categorias_macro():
+    return jsonify(categorias.listar_macros_com_subcategorias())
+
+
+@app.route("/subcategorias", methods=["POST"])
+def criar_subcategoria():
+    dados = _dados_da_requisicao()
+    try:
+        nome = _validar_nome(dados.get("nome"))
+        categoria_macro_id = _validar_macro_id(dados.get("categoria_macro_id"))
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    try:
+        subcategoria = categorias.criar_subcategoria(nome, categoria_macro_id)
+    except categorias.MacroNaoEncontrada:
+        return jsonify({"erro": "categoria_macro_id nao existe"}), 400
+    except categorias.NomeDuplicado:
+        return jsonify({"erro": ERRO_NOME_DUPLICADO}), 409
+    return jsonify(subcategoria), 201
+
+
+@app.route("/subcategorias/<int:subcategoria_id>", methods=["PUT"])
+def renomear_subcategoria(subcategoria_id):
+    try:
+        nome = _validar_nome(_dados_da_requisicao().get("nome"))
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    try:
+        subcategoria = categorias.renomear_subcategoria(subcategoria_id, nome)
+    except categorias.SubcategoriaNaoEncontrada:
+        return jsonify({"erro": "subcategoria nao encontrada"}), 404
+    except categorias.NomeDuplicado:
+        return jsonify({"erro": ERRO_NOME_DUPLICADO}), 409
+    return jsonify(subcategoria)
+
+
+@app.route("/subcategorias/<int:subcategoria_id>", methods=["DELETE"])
+def deletar_subcategoria(subcategoria_id):
+    try:
+        categorias.deletar_subcategoria(subcategoria_id)
+    except categorias.SubcategoriaNaoEncontrada:
+        return jsonify({"erro": "subcategoria nao encontrada"}), 404
+    except categorias.SubcategoriaEmUso as uso:
+        return jsonify({
+            "erro": (
+                f"nao e possivel deletar: {uso.lancamentos} lancamentos e "
+                f"{uso.aprendizados} aprendizados vinculados a esta subcategoria"
+            ),
+            "lancamentos_vinculados": uso.lancamentos,
+            "aprendizados_vinculados": uso.aprendizados,
+        }), 409
+    return "", 204
 
 
 if __name__ == "__main__":
