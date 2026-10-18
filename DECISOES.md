@@ -122,14 +122,6 @@ Investir código para resolver um problema que afeta 1 lançamento recorrente po
 
 ---
 
-## Convenções deste arquivo
-
-- Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.
-- Status possíveis: Proposto, Decidido, Substituído por ADR-XXX, Obsoleto, Adiado.
-- Toda decisão nova entra no final, com data e número incremental.
-
----
-
 ## ADR-004 — SQL puro em vez de ORM
 
 **Data:** 2026-10-18
@@ -307,3 +299,11 @@ Exemplos:
 
 - Usuário relatar fricção com a Opção B em uso real (muitos aprendizados similares sendo criados para variações mínimas).
 - Volume de aprendizados crescer e análise mostrar que a Opção B gera dicionário com muitos duplicados "semânticos".
+
+---
+
+## Convenções deste arquivo
+
+- Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.
+- Status possíveis: Proposto, Decidido, Substituído por ADR-XXX, Obsoleto, Adiado.
+- Toda decisão nova entra no final, com data e número incremental.
