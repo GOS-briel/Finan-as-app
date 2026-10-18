@@ -35,3 +35,6 @@ backend/app/db/financas.db
 # Faturas (dados sensíveis!)
 faturas/
 *.pdf
+
+# Configuração local do Claude Code (específica da máquina)
+.claude/
