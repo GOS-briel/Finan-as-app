@@ -485,6 +485,98 @@ Chave de ordenação: decomposição Unicode (NFKD), remoção dos acentos, `cas
 
 ---
 
+## ADR-013 — Herança de tetos: mês anterior mais recente, calculada em runtime
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+A ADR-006 definiu teto por mês/ano e deixou em aberto: "o que fazer quando não há teto definido para um mês específico (herdar do anterior? mostrar vazio? default?)". Sem uma regra, o usuário teria de recadastrar os 8 tetos todo mês — fricção alta para um app cujo princípio é "fricção baixa".
+
+Opções consideradas:
+- **A:** Mostrar vazio (usuário cadastra todo mês)
+- **B:** Herdar do mês anterior mais recente, calculando na hora da consulta
+- **C:** Herdar copiando (materializando) a linha no banco quando o mês é consultado ou virado
+- **D:** Um teto "padrão" por categoria, sobrescrito por mês
+
+### Decisão
+
+**Opção B — herança do mês anterior mais recente, em runtime, sem gravar nada.**
+
+Para cada categoria macro, no `GET /tetos?mes=&ano=`:
+1. Procura o teto do mês/ano exato. Se existe → `herdado: false`, origem = o próprio mês.
+2. Senão, procura o mais recente **estritamente anterior**: `(ano < ? OR (ano = ? AND mes < ?)) ORDER BY ano DESC, mes DESC LIMIT 1`. Se existe → `herdado: true`, origem = mês/ano do registro encontrado.
+3. Senão → `valor: null`, `herdado: false`, origem `null`.
+
+A resposta sempre traz as 8 macro, com `origem_mes`/`origem_ano` para o frontend mostrar "herdado de setembro/2026".
+
+### Justificativa
+
+1. Fricção mínima: define uma vez, vale até mudar — mas o histórico por mês da ADR-006 continua possível.
+2. Runtime em vez de materializar: o banco guarda só o que o usuário **decidiu**. Mudar o teto de outubro reflete automaticamente em novembro, dezembro… sem rotina de "virada de mês" nem linhas copiadas para limpar depois.
+3. Só olha para trás: um teto definido para dezembro não vale para outubro. Planejar o futuro não reescreve o passado.
+4. O flag `herdado` deixa explícito na UI o que foi decidido e o que é automático.
+5. Funciona cruzando o ano (01/2027 herda de 10/2026).
+
+### Trade-offs aceitos
+
+- Até 16 queries por GET (8 macro × 2) — desprezível neste volume; mantido pela legibilidade, passo a passo.
+- Alterar um teto antigo muda retroativamente os meses seguintes que herdavam dele. Para "congelar" um mês, basta defini-lo explicitamente.
+- `0` e `null` são diferentes: `0` = "não gastar nada" (decidido); `null` = "sem teto".
+
+### Reabrir se:
+
+- O usuário quiser que meses passados fiquem congelados automaticamente (considerar materializar ao fechar o mês).
+- Surgir necessidade de teto padrão anual (Opção D).
+
+---
+
+## ADR-014 — Tetos: PUT como upsert e DELETE que devolve à herança
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+Um teto é identificado pela combinação natural `(categoria_macro_id, mes, ano)` — já protegida pelo `UNIQUE` do schema. Era preciso definir os verbos HTTP e o significado do DELETE num modelo com herança (ADR-013).
+
+Opções consideradas para escrita:
+- **A:** POST para criar + PUT para atualizar (o cliente precisa saber se já existe)
+- **B:** PUT único com semântica de upsert
+
+### Decisão
+
+**1. `PUT /tetos` único, com upsert.**
+Corpo: `{categoria_macro_id, mes, ano, valor}`. Se a combinação existe, atualiza o valor; senão, cria. Sempre 200 com o teto gravado. Implementado como **uma única instrução atômica**:
+`INSERT ... ON CONFLICT (categoria_macro_id, mes, ano) DO UPDATE SET valor = excluded.valor`
+
+**2. `DELETE /tetos?categoria_macro_id=&mes=&ano=` apaga a linha do mês exato.**
+204 se apagou, 404 se não havia teto definido naquele mês. Depois do DELETE, o GET daquele mês passa a mostrar a herança do anterior (ou `null`).
+
+**3. PUT e DELETE agem só no mês/ano exato — nunca na herança.**
+Não dá para "apagar um teto herdado" (404); para mudar um mês que herda, faz-se PUT nele.
+
+### Justificativa
+
+1. **PUT idempotente:** "o teto de Alimentação em 10/2026 é 800" — repetir a requisição dá o mesmo resultado. Encaixa perfeitamente em um recurso com chave natural.
+2. **Frontend mais simples:** a tela de tetos só faz "salvar", sem precisar saber se a linha existe.
+3. **ON CONFLICT em vez de SELECT + INSERT/UPDATE:** operação atômica, sem janela de corrida entre a checagem e a escrita; reaproveita o UNIQUE do schema.
+4. **DELETE = "voltar a herdar":** com herança em runtime, apagar não deixa o mês "sem teto" — devolve-o à regra automática. É a forma natural de desfazer uma exceção pontual (ex: teto maior só em dezembro).
+
+### Trade-offs aceitos
+
+- PUT não distingue criação de atualização na resposta (sempre 200) — irrelevante para o frontend.
+- PUT no corpo e DELETE em query string (DELETE com corpo é mal suportado por clientes HTTP e proxies).
+- Para "zerar" um mês sem herdar, é preciso PUT com `valor: 0`; DELETE não serve para isso.
+
+### Reabrir se:
+
+- O frontend precisar saber se o PUT criou ou atualizou (considerar 201 na criação).
+- Surgir necessidade de operações em lote (definir os 8 tetos de uma vez).
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.

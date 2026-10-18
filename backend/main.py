@@ -1,9 +1,10 @@
+import math
 import os
 import tempfile
 
 from flask import Flask, jsonify, request
 
-from app.db import categorias, inicializar
+from app.db import categorias, inicializar, tetos
 from app.db.lancamentos import salvar_lancamentos_fatura
 from app.fatura.leitor import (
     extrair_competencia,
@@ -25,6 +26,34 @@ def index():
     return "Olá, controle financeiro"
 
 
+# Validação no Python antes dos CHECKs do schema, para o erro sair com
+# mensagem clara. Se mudar uma regra aqui, sincronizar com schema.sql.
+ANO_MINIMO, ANO_MAXIMO = 2000, 2100
+
+
+def _validar_inteiro(valor, campo: str, minimo: int | None = None, maximo: int | None = None) -> int:
+    """Aceita número ou texto numérico (form e query string mandam texto)."""
+    if valor is None or valor == "":
+        raise ValueError(f"{campo} e obrigatorio")
+    # bool é subclasse de int em Python: sem isso, true viraria 1
+    if isinstance(valor, bool) or not isinstance(valor, (int, str)):
+        raise ValueError(f"{campo} deve ser inteiro")
+    try:
+        numero = int(valor)
+    except ValueError:
+        raise ValueError(f"{campo} deve ser inteiro") from None
+    if minimo is not None and not minimo <= numero <= maximo:
+        raise ValueError(f"{campo} deve estar entre {minimo} e {maximo}")
+    return numero
+
+
+def _validar_mes_ano(dados) -> tuple[int, int]:
+    return (
+        _validar_inteiro(dados.get("mes"), "mes", 1, 12),
+        _validar_inteiro(dados.get("ano"), "ano", ANO_MINIMO, ANO_MAXIMO),
+    )
+
+
 def _competencia_do_formulario() -> dict | None:
     """
     Lê "mes" e "ano" opcionais do formulário. Retorna None se nenhum veio,
@@ -36,9 +65,7 @@ def _competencia_do_formulario() -> dict | None:
         return None
     if mes is None or ano is None:
         raise ValueError("mes e ano devem vir juntos")
-    mes, ano = int(mes), int(ano)
-    if not (1 <= mes <= 12 and 2000 <= ano <= 2100):
-        raise ValueError("mes/ano fora do intervalo")
+    mes, ano = _validar_mes_ano(request.form)
     return {"mes": mes, "ano": ano, "fonte": "formulario"}
 
 
@@ -124,13 +151,23 @@ def _validar_nome(valor) -> str:
 
 
 def _validar_macro_id(valor) -> int:
-    # bool é subclasse de int em Python: sem isso, true viraria 1
-    if isinstance(valor, bool) or not isinstance(valor, (int, str)):
-        raise ValueError("categoria_macro_id deve ser inteiro")
+    return _validar_inteiro(valor, "categoria_macro_id")
+
+
+def _validar_valor(valor) -> float:
+    if valor is None or valor == "":
+        raise ValueError("valor e obrigatorio")
+    if isinstance(valor, bool) or not isinstance(valor, (int, float, str)):
+        raise ValueError("valor deve ser numero")
     try:
-        return int(valor)
+        numero = float(valor)
     except ValueError:
-        raise ValueError("categoria_macro_id deve ser inteiro") from None
+        raise ValueError("valor deve ser numero") from None
+    if not math.isfinite(numero):  # "nan", "inf"
+        raise ValueError("valor deve ser numero")
+    if numero < 0:
+        raise ValueError("valor nao pode ser negativo")
+    return round(numero, 2)
 
 
 ERRO_NOME_DUPLICADO = "ja existe uma subcategoria com esse nome nesta categoria"
@@ -188,6 +225,45 @@ def deletar_subcategoria(subcategoria_id):
             "lancamentos_vinculados": uso.lancamentos,
             "aprendizados_vinculados": uso.aprendizados,
         }), 409
+    return "", 204
+
+
+@app.route("/tetos")
+def listar_tetos():
+    try:
+        mes, ano = _validar_mes_ano(request.args)
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    return jsonify(tetos.listar_tetos(mes, ano))
+
+
+@app.route("/tetos", methods=["PUT"])
+def definir_teto():
+    dados = _dados_da_requisicao()
+    try:
+        categoria_macro_id = _validar_macro_id(dados.get("categoria_macro_id"))
+        mes, ano = _validar_mes_ano(dados)
+        valor = _validar_valor(dados.get("valor"))
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    try:
+        teto = tetos.definir_teto(categoria_macro_id, mes, ano, valor)
+    except tetos.MacroNaoEncontrada:
+        return jsonify({"erro": "categoria_macro_id nao existe"}), 400
+    return jsonify(teto)
+
+
+@app.route("/tetos", methods=["DELETE"])
+def apagar_teto():
+    try:
+        categoria_macro_id = _validar_macro_id(request.args.get("categoria_macro_id"))
+        mes, ano = _validar_mes_ano(request.args)
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    try:
+        tetos.apagar_teto(categoria_macro_id, mes, ano)
+    except tetos.TetoNaoEncontrado:
+        return jsonify({"erro": "nao existe teto definido para esta categoria/mes/ano"}), 404
     return "", 204
 
 
