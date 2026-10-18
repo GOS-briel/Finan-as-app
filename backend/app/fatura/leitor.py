@@ -4,7 +4,11 @@
 # devolve uma lista estruturada. Pagamentos/créditos são ignorados.
 #
 # Parcelas são identificadas, mas a data e o valor continuam sendo os
-# do mês da fatura (ADR-002). Ainda não trata transações internacionais.
+# do mês da fatura (ADR-002). Transações internacionais: ver ADR-003.
+#
+# Também lê o cabeçalho da 1ª página: a competência (mês/ano do
+# vencimento, ADR-009) e o total oficial da fatura, usado para conferir
+# a soma dos lançamentos.
 
 import re
 import sys
@@ -17,6 +21,11 @@ RE_LINHA_LANCAMENTO = re.compile(r"\d{2}/\d{2} ")
 RE_VALOR = re.compile(r"(\d[\d.]*,\d{2})(-?)\s*$")
 # Parcela "DD/DD" na descrição, pode vir colada no nome (ex: "PLAZA05/06")
 RE_PARCELA = re.compile(r"(?<!\d)(\d{2})/(\d{2})(?!\d)")
+# Cabeçalho da 1ª página: rótulos numa linha, valores na linha seguinte
+#   "Total de fatura Vencimento Limite de compras ..."
+#   "R$ 1.699,21 10/10/2026 R$ 7.200,00 ..."
+RE_VENCIMENTO = re.compile(r"Vencimento.*\n.*?(\d{2})/(\d{2})/(\d{4})")
+RE_TOTAL_FATURA = re.compile(r"Total de fatura.*\n\s*R\$\s*(\d[\d.]*,\d{2})")
 
 
 def _converter_valor(texto: str) -> float:
@@ -39,6 +48,34 @@ def _detectar_parcela(descricao: str) -> tuple[str, int | None, int | None]:
     sem_parcela = descricao[:achado.start()] + " " + descricao[achado.end():]
     sem_parcela = " ".join(sem_parcela.split())
     return f"{sem_parcela} - Parcela {atual}/{total}", atual, total
+
+
+def _texto_primeira_pagina(pdf_path: str) -> str:
+    """Texto da 1ª página inteira (sem crop: o cabeçalho ocupa a largura toda)."""
+    with pdfplumber.open(pdf_path) as pdf:
+        return pdf.pages[0].extract_text() or ""
+
+
+def extrair_competencia(pdf_path: str) -> dict | None:
+    """
+    Retorna {"mes": int, "ano": int} a partir da data de vencimento
+    (ADR-009), ou None se não encontrar.
+    """
+    achado = RE_VENCIMENTO.search(_texto_primeira_pagina(pdf_path))
+    if achado is None:
+        return None
+    mes, ano = int(achado.group(2)), int(achado.group(3))
+    if not 1 <= mes <= 12:
+        return None
+    return {"mes": mes, "ano": ano}
+
+
+def extrair_total_fatura(pdf_path: str) -> float | None:
+    """Total oficial do cabeçalho da fatura, ou None se não encontrar."""
+    achado = RE_TOTAL_FATURA.search(_texto_primeira_pagina(pdf_path))
+    if achado is None:
+        return None
+    return _converter_valor(achado.group(1))
 
 
 def extrair_lancamentos(pdf_path: str) -> list[dict]:
@@ -84,6 +121,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     lancamentos = extrair_lancamentos(sys.argv[1])
+    print(f"Competência: {extrair_competencia(sys.argv[1])}")
+    print(f"Total no cabeçalho: {extrair_total_fatura(sys.argv[1])}")
 
     parcelados = [item for item in lancamentos if item["parcela_total"] is not None]
 

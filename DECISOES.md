@@ -302,6 +302,108 @@ Exemplos:
 
 ---
 
+## ADR-009 — Competência da fatura: mês/ano do vencimento
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+A ADR-007 define que lançamentos importados recebem a data `AAAA-MM-01` do mês de competência da fatura. O parser, porém, só extrai `DD/MM` de cada lançamento (sem ano), então é preciso descobrir o mês/ano de competência de outra forma.
+
+Investigação no PDF real (fatura de 10/10/2026) mostrou que:
+- Não existe "período de competência" nem "data de fechamento desta fatura" no texto.
+- Existe a **data de vencimento** no cabeçalho da 1ª página (rótulo "Vencimento" numa linha, data `DD/MM/AAAA` na linha seguinte), repetida no boleto.
+- Existe apenas a previsão de fechamento da **próxima** fatura (não serve).
+
+Opções consideradas:
+- **A:** Mês/ano do vencimento, extraído do PDF
+- **B:** Sempre pedir mês/ano ao usuário no upload
+- **C:** Inferir pelas datas dos lançamentos (ex: a data mais recente)
+
+### Decisão
+
+**Opção A, com o formulário como fallback e prioridade.**
+
+- O endpoint lê o vencimento do cabeçalho e usa o seu mês/ano como competência.
+- Se o formulário enviar `mes` e `ano`, eles têm prioridade sobre o detectado.
+- Se não detectar e o formulário não enviar, o endpoint retorna 422 com `"pedir_do_usuario": true`, e o frontend pergunta ao usuário.
+- A resposta informa a fonte (`"fonte": "pdf"` ou `"formulario"`).
+
+### Justificativa
+
+1. Vencimento é o momento em que o dinheiro sai — coerente com a ADR-002 ("o dinheiro sai no mês da fatura").
+2. Está sempre presente no PDF (é um dado obrigatório do boleto).
+3. Zero fricção no caso comum; o usuário só é consultado quando o PDF falha.
+4. Opção C é frágil: parcelas antigas têm datas de meses anteriores.
+
+### Proteção adicional
+
+O total oficial do cabeçalho ("Total de fatura") também é extraído e comparado com a soma dos lançamentos (`total_confere` na resposta). Se o layout da fatura mudar e o parser perder linhas, a divergência aparece na hora.
+
+### Trade-offs aceitos
+
+- Depende do rótulo "Vencimento" no cabeçalho do Bradesco. Mudança de layout quebra a detecção (mitigado pelo fallback 422).
+- Uma fatura com vencimento em dia 1º–5º pode concentrar gastos majoritariamente do mês anterior; aceito, pois o critério é a saída do dinheiro.
+
+### Reabrir se:
+
+- Outro banco/cartão for suportado (cada layout terá sua regra).
+- O usuário preferir competência pelo mês de fechamento.
+
+---
+
+## ADR-010 — Deduplicação de lançamentos de fatura por contagem
+
+**Data:** 2026-10-18
+**Status:** Decidido
+
+### Contexto
+
+Reimportar a mesma fatura não pode duplicar lançamentos. A chave natural de um lançamento de fatura é: descrição + valor + data + parcela_atual + parcela_total.
+
+Problema: pela ADR-007, todo lançamento importado recebe o dia `01`, então o dia original da compra se perde. Dois lançamentos **legítimos e diferentes** — ex: dois cafés de R$ 8,00 no mesmo lugar, em dias distintos — passam a ter **a mesma chave**.
+
+Opções consideradas:
+- **A:** Chave única (UNIQUE / SELECT simples): se a chave já existe, ignora
+- **B:** Contagem: insere a diferença entre ocorrências no PDF e no banco
+- **C:** Guardar o dia original (DD/MM) numa coluna extra e incluí-lo na chave
+
+### Decisão
+
+**Opção B — deduplicação por contagem.**
+
+Para cada chave: `n` = ocorrências no PDF, `m` = ocorrências já no banco (`origem = 'fatura'`). Insere `max(0, n − m)`.
+
+| Situação | n | m | Inseridos |
+|---|---|---|---|
+| 1ª importação com 2 cafés iguais | 2 | 0 | 2 |
+| Reimportação da mesma fatura | 2 | 2 | 0 |
+| Importação anterior interrompida | 2 | 1 | 1 |
+
+### Justificativa
+
+1. A Opção A **perde gastos reais silenciosamente** já na primeira importação — inaceitável num app financeiro.
+2. Reimportação continua idempotente.
+3. Toda a importação roda numa transação única: ou entra a fatura inteira, ou nada.
+4. Custo igual ao da Opção A (um COUNT por chave).
+
+### Detalhe de implementação
+
+A comparação das parcelas usa `IS` em vez de `=`: em SQL, `NULL = NULL` não é verdadeiro, e com `=` os lançamentos não parcelados nunca seriam reconhecidos como duplicata.
+
+### Trade-offs aceitos
+
+- Se o banco emitir uma fatura **corrigida** com um lançamento a menos, a reimportação não apaga o excedente (só insere, nunca remove).
+- Um lançamento manual idêntico não conta como duplicata (só `origem = 'fatura'` entra na contagem) — por design.
+
+### Reabrir se:
+
+- Surgirem faturas corrigidas/retificadas na prática.
+- A Opção C for necessária por outro motivo (ex: análise por dia da compra, ver ADR-002 "Reabrir se").
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.
