@@ -577,6 +577,129 @@ Não dá para "apagar um teto herdado" (404); para mudar um mês que herda, faz-
 
 ---
 
+## ADR-015 — Data de lançamento manual: até 90 dias no passado, nunca no futuro
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+A ADR-007 definiu que lançamentos manuais usam a data real escolhida pelo usuário. Faltava definir os limites: sem nenhum, um erro de digitação (2062 em vez de 2026, ou 2016) jogaria o gasto num mês que ninguém olha, distorcendo dashboards e tetos sem que o usuário perceba.
+
+### Decisão
+
+- **Futuro bloqueado:** data posterior a hoje → 400.
+- **Até 90 dias no passado:** `hoje − 90` é aceito; `hoje − 91` → 400 (leitura literal de "mais de 90 dias").
+- O limite é a constante `DIAS_RETROATIVO_MAXIMO = 90` no topo do `main.py`, fácil de ajustar.
+- Formato estrito `AAAA-MM-DD` (regex + `date.fromisoformat`): recusa `21/10/2026`, `20261021`, `2026-W43-3` e datas impossíveis como `2026-02-30`.
+- No PUT, a janela só é checada **se a data mudar** (ver ADR-016): editar o valor de um lançamento antigo, reenviando a mesma data, continua funcionando.
+
+### Justificativa
+
+1. Futuro não faz sentido para despesa já realizada; bloquear pega erro de digitação na hora.
+2. 90 dias cobrem o caso real ("esqueci de lançar aquele almoço do mês passado") com folga, sem permitir reescrever o histórico antigo.
+3. Constante nomeada torna a regra explícita e trivial de mudar.
+
+### Trade-offs aceitos
+
+- **Fuso horário:** "hoje" é `date.today()`, o relógio do servidor. Na máquina local é o horário de Brasília. Ao hospedar o backend (Railway/Render costumam usar UTC), entre 21h e 0h a fronteira dos 90 dias pode deslocar 1 dia. A data futura não é afetada (o servidor em UTC está sempre à frente do Brasil). Usar `ZoneInfo("America/Sao_Paulo")` exigiria o pacote `tzdata` no Windows; ficou como TODO no código, ao lado da constante, para resolver no deploy.
+- Despesas com mais de 90 dias não podem ser lançadas manualmente — aceitável para v1; basta ajustar a constante se virar necessidade.
+
+### Reabrir se:
+
+- O backend for hospedado (resolver o TODO de fuso).
+- O usuário precisar lançar gastos mais antigos com frequência.
+
+---
+
+## ADR-016 — Edição de lançamentos importados: só subcategoria e nota
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+Lançamentos importados (`origem = "fatura"`) refletem a fatura do banco, que é a fonte da verdade. Lançamentos manuais pertencem ao usuário. O `PUT /lancamentos/<id>` precisava de regras diferentes para cada origem, e de um DELETE coerente com isso.
+
+### Decisão
+
+**1. Três níveis de campo:**
+
+| Campo | Manual | Importado |
+|---|---|---|
+| `subcategoria_id`, `nota` | editável | editável |
+| `data`, `descricao`, `valor` | editável | **403** `campos_bloqueados` |
+| `id`, `origem`, `parcela_atual`, `parcela_total`, `criado_em` | **400** `campos_nao_permitidos` | **400** `campos_nao_permitidos` |
+
+O 400 vale também para o POST: `origem` é sempre forçada como `"manual"` e parcelas sempre NULL — enviar esses campos é erro do cliente, não é ignorado em silêncio.
+
+**2. Só conta como alteração o que difere do banco.**
+Antes de bloquear ou validar, cada campo enviado é normalizado (`"48.63"` → `48.63`, espaços removidos) e comparado com o valor atual. Reenviar o objeto inteiro com valores iguais não dispara 403 nem a janela de datas da ADR-015. `campos_bloqueados` lista só os campos que de fato mudariam.
+
+Por isso a ordem das checagens no PUT é: 404 → 400 (corpo vazio / campos não permitidos) → 400 (formato) → 400 (janela de data, só manual e só se a data mudou) → 403. O formato precisa vir antes do 403 porque a comparação exige valores já normalizados.
+
+**3. DELETE é definitivo, para qualquer origem.**
+`DELETE FROM lancamentos WHERE id = ?` — sem soft delete, sem lixeira, sem endpoint de restaurar. A proteção contra exclusão acidental fica na UI (confirmação), em etapa futura.
+
+### Justificativa
+
+1. **Fatura como fonte da verdade:** valor, data e descrição de um importado vêm do banco; mudá-los criaria divergência com o extrato real. Categorizar e anotar são enriquecimentos do usuário, não alterações do fato.
+2. **Mantém a ADR-010 correta:** a chave de deduplicação é descrição + valor + data + parcelas. Se esses campos pudessem ser editados, a reimportação da mesma fatura não reconheceria o lançamento editado e criaria uma duplicata. O bloqueio é o que garante a idempotência da importação.
+3. **400 vs 403:** 400 = "esse campo não existe para edição" (erro do cliente); 403 = "o campo existe, mas não é permitido para este lançamento" (regra de negócio). Mensagens distintas facilitam o tratamento no frontend.
+4. **Comparação com o atual:** frontends costumam enviar o objeto inteiro; sem isso, categorizar um importado daria 403 e editar o valor de um manual antigo daria 400.
+5. **Hard delete:** simplicidade; dados de um app pessoal, sem requisito de auditoria.
+
+### Interação com a ADR-010 (registrada conscientemente)
+
+Como o DELETE é definitivo e a deduplicação é por contagem, **apagar um lançamento importado e reimportar a mesma fatura faz ele voltar** (n = 1 no PDF, m = 0 no banco). Comportamento considerado correto: a fatura é a fonte da verdade; o DELETE remove o registro, não "desmente" a fatura. Lançamentos importados apenas categorizados ou anotados não duplicam na reimportação (testado).
+
+### Trade-offs aceitos
+
+- Um importado com erro do próprio banco não pode ser corrigido no app (só anotado); a correção virá na próxima fatura.
+- Exclusão acidental não tem desfazer na API.
+- Para "esconder" um importado de vez, não basta apagar se a fatura for reimportada.
+
+### Reabrir se:
+
+- Surgir necessidade de "ignorar" importados permanentemente (considerar flag de oculto em vez de DELETE).
+- Exclusões acidentais virarem problema real mesmo com confirmação na UI (considerar soft delete).
+
+---
+
+## ADR-017 — Categorização: PUT silencioso agora, categorização com aprendizado na Etapa 9
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+Há dois jeitos de atribuir uma subcategoria a um lançamento:
+- **Silencioso:** só grava `subcategoria_id` no lançamento.
+- **Aprendendo:** grava e também cria/atualiza uma entrada em `aprendizados` (ADR-008), para que lançamentos futuros com a mesma descrição limpa sejam sugeridos automaticamente.
+
+### Decisão
+
+- **Etapa 8:** `PUT /lancamentos/<id>` com `subcategoria_id` faz a categorização **silenciosa** — nunca toca na tabela `aprendizados`.
+- **Etapa 9:** um endpoint próprio, `POST /lancamentos/<id>/categorizar`, fará a categorização **com aprendizado**.
+
+### Justificativa
+
+1. **Responsabilidade única:** o PUT edita campos de um recurso; aprender é um efeito colateral sobre *outro* recurso (`aprendizados`). Misturar os dois num PUT genérico esconderia esse efeito.
+2. **Correções sem poluir o dicionário:** recategorizar um caso pontual (ex: uma compra atípica numa loja de sempre) não deve ensinar o app errado.
+3. **PUT continua previsível e idempotente;** o POST de categorizar deixa explícito, no próprio verbo e na rota, que há uma ação com consequências.
+4. **Entrega incremental:** a Etapa 8 já permite categorizar manualmente; a lógica de aprendizado (normalização da ADR-008, confiança, atualização) ganha uma etapa própria.
+
+### Trade-offs aceitos
+
+- Duas formas de categorizar: o frontend precisa escolher qual chamar (provavelmente "categorizar" como ação padrão na tela de importação, e PUT na edição avulsa).
+- Até a Etapa 9, nada é aprendido — toda categorização é manual.
+
+### Reabrir se:
+
+- Na prática, o usuário sempre quiser aprender ao categorizar (considerar parâmetro `aprender=true` no PUT, ou unificar).
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.

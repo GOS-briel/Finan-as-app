@@ -1,12 +1,40 @@
 # Persistência de lançamentos
 #
 # SQL puro com sqlite3 (ADR-004). Sempre parâmetros "?", nunca SQL
-# montado com concatenação de strings.
+# montado com concatenação de valores.
+#
+# - Importação da fatura com deduplicação por contagem (ADR-010)
+# - CRUD de lançamentos: manuais editáveis; importados só permitem
+#   alterar subcategoria e nota (ADR-016). DELETE é definitivo.
+#
+# Erros viram exceções próprias; o main.py traduz cada uma para HTTP.
 
+import sqlite3
 from collections import Counter
 from datetime import datetime
 
 from app.db.inicializar import conectar
+
+
+class LancamentoNaoEncontrado(Exception):
+    pass
+
+
+class SubcategoriaNaoEncontrada(Exception):
+    pass
+
+
+class EdicaoBloqueada(Exception):
+    def __init__(self, campos: list[str]):
+        super().__init__(f"campos bloqueados: {campos}")
+        self.campos = campos
+
+
+# Únicos campos que um cliente pode enviar; o resto (id, origem,
+# parcelas, criado_em) nunca é editável
+CAMPOS_EDITAVEIS = ("data", "descricao", "valor", "subcategoria_id", "nota")
+# Em importados também são bloqueados: são a chave de deduplicação (ADR-010)
+CAMPOS_BLOQUEADOS_EM_IMPORTADOS = ("descricao", "valor", "data")
 
 # "IS" em vez de "=" nas parcelas: em SQL, "NULL = NULL" não é verdadeiro,
 # então lançamentos não parcelados nunca seriam reconhecidos como duplicata
@@ -72,3 +100,140 @@ def salvar_lancamentos_fatura(lancamentos: list[dict], mes: int, ano: int) -> li
     finally:
         conexao.close()
     return resultado
+
+
+# LEFT JOIN: lançamento sem subcategoria continua na lista, com os campos
+# de categoria em null (com JOIN simples, os não categorizados sumiriam)
+SQL_SELECIONAR = """
+    SELECT l.id, l.data, l.descricao, l.valor,
+           l.subcategoria_id, s.nome AS subcategoria_nome,
+           m.id AS categoria_macro_id, m.nome AS categoria_macro_nome,
+           l.parcela_atual, l.parcela_total, l.origem, l.nota, l.criado_em
+    FROM lancamentos l
+    LEFT JOIN subcategorias s ON s.id = l.subcategoria_id
+    LEFT JOIN categorias_macro m ON m.id = s.categoria_macro_id
+"""
+
+
+def _conectar_com_dicts() -> sqlite3.Connection:
+    conexao = conectar()
+    conexao.row_factory = sqlite3.Row  # linhas acessíveis por nome de coluna
+    return conexao
+
+
+def _buscar(conexao, lancamento_id: int) -> dict:
+    linha = conexao.execute(SQL_SELECIONAR + " WHERE l.id = ?", (lancamento_id,)).fetchone()
+    if linha is None:
+        raise LancamentoNaoEncontrado()
+    return dict(linha)
+
+
+def _garantir_subcategoria(conexao, subcategoria_id: int) -> None:
+    existe = conexao.execute(
+        "SELECT 1 FROM subcategorias WHERE id = ?", (subcategoria_id,)
+    ).fetchone()
+    if existe is None:
+        raise SubcategoriaNaoEncontrada()
+
+
+def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None,
+                       origem: str | None = None) -> list[dict]:
+    """Lançamentos do mês/ano, mais recentes primeiro. Filtros opcionais."""
+    inicio = f"{ano:04d}-{mes:02d}-01"
+    fim = f"{ano + 1:04d}-01-01" if mes == 12 else f"{ano:04d}-{mes + 1:02d}-01"
+    condicoes, parametros = ["l.data >= ?", "l.data < ?"], [inicio, fim]
+    if categoria_macro_id is not None:
+        condicoes.append("m.id = ?")
+        parametros.append(categoria_macro_id)
+    if origem is not None:
+        condicoes.append("l.origem = ?")
+        parametros.append(origem)
+
+    conexao = _conectar_com_dicts()
+    try:
+        linhas = conexao.execute(
+            SQL_SELECIONAR + " WHERE " + " AND ".join(condicoes)
+            + " ORDER BY l.data DESC, l.id DESC",
+            parametros,
+        ).fetchall()
+    finally:
+        conexao.close()
+    return [dict(linha) for linha in linhas]
+
+
+def buscar_lancamento(lancamento_id: int) -> dict:
+    conexao = _conectar_com_dicts()
+    try:
+        return _buscar(conexao, lancamento_id)
+    finally:
+        conexao.close()
+
+
+def criar_lancamento_manual(data: str, descricao: str, valor: float,
+                            subcategoria_id: int | None, nota: str | None) -> dict:
+    """Origem sempre 'manual' e sem parcelas (não há parcelamento manual na v1)."""
+    conexao = _conectar_com_dicts()
+    try:
+        with conexao:
+            if subcategoria_id is not None:
+                _garantir_subcategoria(conexao, subcategoria_id)
+            cursor = conexao.execute(
+                """
+                INSERT INTO lancamentos
+                    (data, descricao, valor, subcategoria_id, parcela_atual,
+                     parcela_total, origem, nota, criado_em)
+                VALUES (?, ?, ?, ?, NULL, NULL, 'manual', ?, ?)
+                """,
+                (data, descricao, valor, subcategoria_id, nota,
+                 datetime.now().isoformat(timespec="seconds")),
+            )
+            return _buscar(conexao, cursor.lastrowid)
+    finally:
+        conexao.close()
+
+
+def atualizar_lancamento(lancamento_id: int, alteracoes: dict) -> dict:
+    """
+    Aplica só os campos que MUDARAM (o main.py compara com o valor atual,
+    então reenviar o objeto inteiro não conta como alteração).
+    Importado (origem 'fatura'): alterar descricao, valor ou data levanta
+    EdicaoBloqueada (ADR-016).
+    """
+    conexao = _conectar_com_dicts()
+    try:
+        with conexao:
+            linha = conexao.execute(
+                "SELECT origem FROM lancamentos WHERE id = ?", (lancamento_id,)
+            ).fetchone()
+            if linha is None:
+                raise LancamentoNaoEncontrado()
+            if linha["origem"] == "fatura":
+                bloqueados = [c for c in CAMPOS_BLOQUEADOS_EM_IMPORTADOS if c in alteracoes]
+                if bloqueados:
+                    raise EdicaoBloqueada(bloqueados)
+            if alteracoes.get("subcategoria_id") is not None:
+                _garantir_subcategoria(conexao, alteracoes["subcategoria_id"])
+
+            # Nomes de coluna vêm da lista fixa CAMPOS_EDITAVEIS, nunca do
+            # cliente; valores sempre por "?"
+            colunas = [c for c in CAMPOS_EDITAVEIS if c in alteracoes]
+            if colunas:
+                conexao.execute(
+                    f"UPDATE lancamentos SET {', '.join(f'{c} = ?' for c in colunas)} WHERE id = ?",
+                    [alteracoes[c] for c in colunas] + [lancamento_id],
+                )
+            return _buscar(conexao, lancamento_id)
+    finally:
+        conexao.close()
+
+
+def apagar_lancamento(lancamento_id: int) -> None:
+    """DELETE definitivo, de qualquer origem (sem lixeira nem restauração)."""
+    conexao = conectar()
+    try:
+        with conexao:
+            cursor = conexao.execute("DELETE FROM lancamentos WHERE id = ?", (lancamento_id,))
+            if cursor.rowcount == 0:
+                raise LancamentoNaoEncontrado()
+    finally:
+        conexao.close()
