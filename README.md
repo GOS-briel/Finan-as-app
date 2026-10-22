@@ -4,15 +4,15 @@ App de controle financeiro pessoal focado em fricção baixa (registrar um gasto
 
 ## Estado atual
 
-🚧 **Em desenvolvimento** — trilha PWA + Python (Flask), fase de setup inicial.
+🚧 **Em desenvolvimento** — trilha PWA + Python (Flask). **Backend da v1 completo** (API REST); frontend PWA ainda não iniciado.
 
-## Funcionalidades planejadas (v1)
+## Funcionalidades (v1)
 
 - Dashboard com gasto vs orçamento do mês e tetos por categoria
 - Registro rápido de gastos manuais
 - Histórico agrupado por categoria
-- Importação de fatura Bradesco (PDF) com categorização semi-automática
-- Tratamento de compras parceladas (registra parcela atual + gera futuras)
+- Importação de fatura Bradesco (PDF) com categorização por sugestões aprendidas
+- Compras parceladas: a parcela é registrada no mês da fatura, com "Parcela X/Y" identificada (ADR-002)
 
 ## Categorias
 
@@ -21,14 +21,14 @@ App de controle financeiro pessoal focado em fricção baixa (registrar um gasto
 
 ## Stack
 
-- **Backend:** Python 3.13 + Flask
+- **Backend:** Python 3.13+ + Flask
 - **Leitura de PDF:** pdfplumber
-- **Persistência:** SQLite (backend) — a definir
+- **Persistência:** SQLite com `sqlite3` puro, sem ORM (ADR-001, ADR-004)
 - **Frontend:** HTML + CSS + JavaScript (PWA)
 
 ## Como rodar (dev)
 
-\\\ash
+```powershell
 # Criar e ativar o ambiente virtual
 py -m venv venv
 .\venv\Scripts\Activate.ps1  # Windows PowerShell
@@ -36,9 +36,32 @@ py -m venv venv
 # Instalar dependências
 pip install -r requirements.txt
 
-# Rodar (a implementar)
+# Rodar a API em http://127.0.0.1:5000
 python backend/main.py
-\\\
+```
+
+O banco (`backend/app/db/financas.db`) é criado automaticamente na primeira requisição, com as 8 categorias macro. Para criá-lo manualmente: `python backend/app/db/inicializar.py`. O arquivo fica fora do Git (dados pessoais).
+
+## API
+
+Todas as respostas são JSON; erros vêm como `{"erro": "..."}`. Corpos aceitam JSON ou formulário. Regras detalhadas de cada recurso estão nas ADRs indicadas ([DECISOES.md](DECISOES.md)).
+
+| Método | Rota | Para que serve | ADRs |
+|---|---|---|---|
+| GET | `/` | Health check | — |
+| POST | `/fatura/importar` | Upload do PDF (`arquivo`, `mes`/`ano` opcionais); grava os lançamentos sem duplicar | 007, 009, 010 |
+| GET | `/categorias/macro` | As 8 macro com subcategorias embutidas, em ordem alfabética natural | 011, 012 |
+| POST | `/subcategorias` | Cria subcategoria (`nome`, `categoria_macro_id`) | 011, 012 |
+| PUT | `/subcategorias/<id>` | Renomeia subcategoria | 012 |
+| DELETE | `/subcategorias/<id>` | Apaga, se não houver lançamentos nem aprendizados vinculados | 011 |
+| GET | `/tetos?mes=&ano=` | Teto das 8 macro no mês, com herança do mês anterior | 013 |
+| PUT | `/tetos` | Define ou atualiza um teto (upsert) | 014 |
+| DELETE | `/tetos?categoria_macro_id=&mes=&ano=` | Remove o teto do mês (volta a herdar) | 014 |
+| GET | `/lancamentos?mes=&ano=` | Lançamentos do mês, com `subcategoria_sugerida`. Filtros: `categoria_macro_id`, `origem`, `sem_categoria=true` | 018 |
+| POST | `/lancamentos` | Cria lançamento manual (até 90 dias no passado) | 015 |
+| PUT | `/lancamentos/<id>` | Edita; importados só aceitam `subcategoria_id` e `nota` | 016, 017 |
+| DELETE | `/lancamentos/<id>` | Apaga definitivamente | 016 |
+| POST | `/lancamentos/<id>/categorizar` | Categoriza **e** ensina o app (ou descategoriza com `null`) | 017, 019, 020 |
 
 ## Autor
 
@@ -46,54 +69,85 @@ Gabriel de Oliveira Silva — [GOS-briel](https://github.com/GOS-briel)
 
 ---
 
-## 📌 Marcador de retomada (atualizado em 2026-10-15)
+## 📌 Marcador de retomada (atualizado em 2026-10-22)
 
 Esta seção serve para retomar o projeto rapidamente em sessões futuras sem reexplicar contexto.
 
 ### Status atual
 
-**Backend — parcialmente completo:**
-- ✅ Parser Bradesco funcional (extração + parcelas)
-- ✅ API Flask com endpoint POST /fatura/importar
-- ❌ Persistência SQLite (próxima etapa)
-- ❌ CRUDs de lançamentos/categorias/tetos
-- ❌ Categorização automática por aprendizado
+**Backend — v1 completo:**
+- ✅ Parser Bradesco (extração, parcelas, competência pelo vencimento, conferência do total)
+- ✅ Importação da fatura gravando no SQLite, com deduplicação por contagem
+- ✅ Schema SQLite (5 tabelas) com foreign keys e CHECKs
+- ✅ CRUD de subcategorias (macro fixas)
+- ✅ CRUD de tetos com herança automática do mês anterior
+- ✅ CRUD de lançamentos manuais, com proteção dos importados
+- ✅ Categorização por aprendizado, com sugestões no GET
+- ❌ **Testes automatizados versionados no repositório** (ver abaixo)
 
 **Frontend — não iniciado:**
 - 4 telas definidas em mockups (Dashboard, Registrar, Histórico, Importar)
 - Não existe código ainda
 
+### ⚠️ Próxima etapa — Etapa 10: testes automatizados (antes do frontend)
+
+Todas as etapas foram testadas (mais de 150 casos), mas **com scripts que ficaram fora do repositório** (pasta temporária da sessão). Hoje o repo não consegue reproduzir essas verificações, e qualquer mudança no backend — inclusive as que o frontend vai exigir — pode quebrar algo sem aviso.
+
+Plano da etapa:
+- Criar `backend/tests/` com `pytest` (e `pytest` no `requirements.txt`)
+- Fixture com banco SQLite temporário (trocando `inicializar.CAMINHO_BANCO`) + `app.test_client()` do Flask — o padrão já usado nas Etapas 6 a 9
+- Portar os casos por recurso: parser, importação, categorias, tetos, lançamentos, aprendizados
+- O teste com a fatura real depende de um PDF que não pode ir para o Git (dados sensíveis): marcar como opcional (pulado se o arquivo não existir) ou criar um PDF sintético
+
+Depois dela: **frontend PWA** (4 telas).
+
 ### Decisões já tomadas
 
-Ver DECISOES.md:
-- ADR-001: SQLite no backend
-- ADR-002: Data de parcela = mês da fatura
-- ADR-003: Transações internacionais adiadas
+Ver [DECISOES.md](DECISOES.md) (detalhes) e [BACKLOG.md](BACKLOG.md) (features adiadas):
 
-### Próxima etapa — Etapa 5
-
-Criar o modelo de dados SQLite com tabelas:
-- categorias (8 macro fixas + subcategorias customizáveis)
-- tetos (orçamento mensal por categoria)
-- lancamentos (dados extraídos ou registrados manualmente)
-- aprendizados (dicionário interno para categorização automática)
+| ADR | Decisão |
+|---|---|
+| 001 | SQLite no backend |
+| 002 | Parcela registrada no mês da fatura |
+| 003 | Transações internacionais: tratamento especial adiado |
+| 004 | SQL puro (`sqlite3`), sem ORM |
+| 005 | Categorias em duas tabelas (macro fixas + subcategorias) |
+| 006 | Teto por mês/ano |
+| 007 | Lançamento importado com data `AAAA-MM-01` |
+| 008 | Aprendizado pela descrição limpa |
+| 009 | Competência da fatura = mês/ano do vencimento |
+| 010 | Deduplicação da importação por contagem |
+| 011 | Endpoints de categorias (subs embutidas, DELETE bloqueado se em uso) |
+| 012 | Nomes sem diferenciar maiúsculas e ordenação natural |
+| 013 | Herança de tetos calculada em runtime |
+| 014 | Tetos: PUT upsert e DELETE que volta à herança |
+| 015 | Lançamento manual: até 90 dias no passado, nunca no futuro |
+| 016 | Importados só editam subcategoria e nota; DELETE definitivo |
+| 017 | PUT categoriza em silêncio; `categorizar` aprende |
+| 018 | Sugestão embutida no GET, 1 query em lote |
+| 019 | Regras de aprendizado (criado/reforçado/sobrescrito/apagado/...) |
+| 020 | Sugestão a partir de 1 confirmação |
 
 ### Pendências técnicas identificadas
 
-A serem endereçadas em etapas futuras:
-- MAX_CONTENT_LENGTH (limitar tamanho de upload)
-- CORS (para o frontend consumir a API)
-- Persistência no SQLite (etapa 5)
+- **Testes automatizados no repositório** — Etapa 10, acima
+- **CORS** — obrigatório antes do frontend consumir a API de outra origem
+- **MAX_CONTENT_LENGTH** — limitar o tamanho do upload da fatura
+- **Fuso horário** — TODO no `main.py`: usar `ZoneInfo("America/Sao_Paulo")` ao hospedar (ADR-015)
+- **Validação duplicada** — regras no `main.py` e nos CHECKs do `schema.sql`: mudar uma exige sincronizar a outra
+- **Transações internacionais** — adiadas (ADR-003)
 
 ### Ambientes de desenvolvimento
 
 - Máquina principal: `D:\financas-app` (Python 3.13.15)
 - Máquina trabalho: `C:\Users\br0098346777\Documents\Finan-as-app` (Python 3.14)
 - Ambas sincronizadas via GitHub — sempre `git pull` antes de nova sessão
+- O `financas.db` não vai pelo Git: em cada máquina, ele é criado na primeira execução
 
 ### Fatura de referência para testes
 
 Fatura Bradesco de 10/10/2026, utilizada para validar o parser:
 - 23 lançamentos extraídos
-- Total de despesas: R$ 1.699,21
+- Total de despesas: R$ 1.699,21 (confere com o total do cabeçalho)
 - 6 lançamentos parcelados identificados corretamente
+- Competência detectada: 10/2026
