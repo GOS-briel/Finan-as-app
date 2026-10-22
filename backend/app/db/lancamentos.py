@@ -6,6 +6,7 @@
 # - Importação da fatura com deduplicação por contagem (ADR-010)
 # - CRUD de lançamentos: manuais editáveis; importados só permitem
 #   alterar subcategoria e nota (ADR-016). DELETE é definitivo.
+# - Categorização com aprendizado e sugestões (ADRs 017 a 020)
 #
 # Erros viram exceções próprias; o main.py traduz cada uma para HTTP.
 
@@ -13,6 +14,7 @@ import sqlite3
 from collections import Counter
 from datetime import datetime
 
+from app.db import aprendizados
 from app.db.inicializar import conectar
 
 
@@ -121,11 +123,29 @@ def _conectar_com_dicts() -> sqlite3.Connection:
     return conexao
 
 
+def _enriquecer_com_sugestoes(conexao, lista: list[dict]) -> list[dict]:
+    """
+    Acrescenta "subcategoria_sugerida" em todos os lançamentos (ADR-018):
+    sugestão do aprendizado para os sem categoria, null para o resto.
+    Uma única query em aprendizados para a lista inteira.
+    """
+    padroes = {
+        item["id"]: aprendizados.normalizar_padrao(item["descricao"])
+        for item in lista if item["subcategoria_id"] is None
+    }
+    sugestoes = aprendizados.buscar_sugestoes_batch(conexao, padroes.values())
+    for item in lista:
+        padrao = padroes.get(item["id"])
+        item["subcategoria_sugerida"] = sugestoes.get(padrao) if padrao is not None else None
+    return lista
+
+
 def _buscar(conexao, lancamento_id: int) -> dict:
     linha = conexao.execute(SQL_SELECIONAR + " WHERE l.id = ?", (lancamento_id,)).fetchone()
     if linha is None:
         raise LancamentoNaoEncontrado()
-    return dict(linha)
+    # Mesmo formato do GET em qualquer resposta de lançamento único
+    return _enriquecer_com_sugestoes(conexao, [dict(linha)])[0]
 
 
 def _garantir_subcategoria(conexao, subcategoria_id: int) -> None:
@@ -137,8 +157,11 @@ def _garantir_subcategoria(conexao, subcategoria_id: int) -> None:
 
 
 def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None,
-                       origem: str | None = None) -> list[dict]:
-    """Lançamentos do mês/ano, mais recentes primeiro. Filtros opcionais."""
+                       origem: str | None = None, sem_categoria: bool = False) -> list[dict]:
+    """
+    Lançamentos do mês/ano, mais recentes primeiro, com sugestão de
+    subcategoria para os não categorizados. Filtros opcionais.
+    """
     inicio = f"{ano:04d}-{mes:02d}-01"
     fim = f"{ano + 1:04d}-01-01" if mes == 12 else f"{ano:04d}-{mes + 1:02d}-01"
     condicoes, parametros = ["l.data >= ?", "l.data < ?"], [inicio, fim]
@@ -148,6 +171,8 @@ def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None
     if origem is not None:
         condicoes.append("l.origem = ?")
         parametros.append(origem)
+    if sem_categoria:
+        condicoes.append("l.subcategoria_id IS NULL")
 
     conexao = _conectar_com_dicts()
     try:
@@ -156,9 +181,9 @@ def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None
             + " ORDER BY l.data DESC, l.id DESC",
             parametros,
         ).fetchall()
+        return _enriquecer_com_sugestoes(conexao, [dict(linha) for linha in linhas])
     finally:
         conexao.close()
-    return [dict(linha) for linha in linhas]
 
 
 def buscar_lancamento(lancamento_id: int) -> dict:
@@ -223,6 +248,46 @@ def atualizar_lancamento(lancamento_id: int, alteracoes: dict) -> dict:
                     [alteracoes[c] for c in colunas] + [lancamento_id],
                 )
             return _buscar(conexao, lancamento_id)
+    finally:
+        conexao.close()
+
+
+def categorizar_lancamento(lancamento_id: int, subcategoria_id: int | None) -> tuple[dict, dict]:
+    """
+    Categoriza (ou descategoriza, com None) E aprende (ADR-017, ADR-019).
+    Tudo numa transação: nunca fica lançamento categorizado sem o
+    aprendizado correspondente, nem o contrário.
+    Retorna (lancamento, {"acao", "confianca"}).
+    """
+    conexao = _conectar_com_dicts()
+    try:
+        with conexao:
+            linha = conexao.execute(
+                "SELECT descricao, subcategoria_id FROM lancamentos WHERE id = ?",
+                (lancamento_id,),
+            ).fetchone()
+            if linha is None:
+                raise LancamentoNaoEncontrado()
+            if subcategoria_id is not None:
+                _garantir_subcategoria(conexao, subcategoria_id)
+            subcategoria_anterior = linha["subcategoria_id"]
+
+            conexao.execute(
+                "UPDATE lancamentos SET subcategoria_id = ? WHERE id = ?",
+                (subcategoria_id, lancamento_id),
+            )
+
+            padrao = aprendizados.normalizar_padrao(linha["descricao"])
+            if not padrao:
+                aprendizado = {"acao": "nenhuma", "confianca": None}
+            elif subcategoria_id is None:
+                aprendizado = aprendizados.apagar_aprendizado(conexao, padrao, subcategoria_anterior)
+            else:
+                aprendizado = aprendizados.upsert_aprendizado(
+                    conexao, padrao, subcategoria_id,
+                    lancamento_ja_estava_nela=(subcategoria_anterior == subcategoria_id),
+                )
+            return _buscar(conexao, lancamento_id), aprendizado
     finally:
         conexao.close()
 

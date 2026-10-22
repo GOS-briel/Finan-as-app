@@ -223,9 +223,9 @@ VALIDADORES_LANCAMENTO = {
 }
 
 
-def _resposta_campos_nao_permitidos(dados):
+def _resposta_campos_nao_permitidos(dados, permitidos=lancamentos.CAMPOS_EDITAVEIS):
     """400 se vier campo que ninguém pode editar (id, origem, parcelas...)."""
-    nao_permitidos = sorted(set(dados) - set(lancamentos.CAMPOS_EDITAVEIS))
+    nao_permitidos = sorted(set(dados) - set(permitidos))
     if not nao_permitidos:
         return None
     return jsonify({
@@ -341,9 +341,14 @@ def listar_lancamentos():
         origem = request.args.get("origem") or None
         if origem not in (None, "manual", "fatura"):
             raise ValueError("origem deve ser 'manual' ou 'fatura'")
+        sem_categoria = request.args.get("sem_categoria", "false")
+        if sem_categoria not in ("true", "false"):
+            raise ValueError("sem_categoria deve ser 'true' ou 'false'")
     except ValueError as erro:
         return jsonify({"erro": str(erro)}), 400
-    return jsonify(lancamentos.listar_lancamentos(mes, ano, categoria_macro_id, origem))
+    return jsonify(lancamentos.listar_lancamentos(
+        mes, ano, categoria_macro_id, origem, sem_categoria=(sem_categoria == "true")
+    ))
 
 
 @app.route("/lancamentos", methods=["POST"])
@@ -404,6 +409,28 @@ def atualizar_lancamento(lancamento_id):
     except lancamentos.SubcategoriaNaoEncontrada:
         return jsonify({"erro": "subcategoria_id nao existe"}), 400
     return jsonify(atualizado)
+
+
+@app.route("/lancamentos/<int:lancamento_id>/categorizar", methods=["POST"])
+def categorizar_lancamento(lancamento_id):
+    """Categoriza E alimenta os aprendizados (o PUT categoriza em silêncio — ADR-017)."""
+    dados = _dados_da_requisicao()
+    if "subcategoria_id" not in dados:
+        return jsonify({"erro": "subcategoria_id e obrigatorio (null para descategorizar)"}), 400
+    erro_campos = _resposta_campos_nao_permitidos(dados, permitidos=("subcategoria_id",))
+    if erro_campos:
+        return erro_campos
+    try:
+        subcategoria_id = _validar_subcategoria_id(dados.get("subcategoria_id"))
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    try:
+        lancamento, aprendizado = lancamentos.categorizar_lancamento(lancamento_id, subcategoria_id)
+    except lancamentos.LancamentoNaoEncontrado:
+        return jsonify({"erro": "lancamento nao encontrado"}), 404
+    except lancamentos.SubcategoriaNaoEncontrada:
+        return jsonify({"erro": "subcategoria_id nao existe"}), 400
+    return jsonify({"lancamento": lancamento, "aprendizado": aprendizado})
 
 
 @app.route("/lancamentos/<int:lancamento_id>", methods=["DELETE"])

@@ -700,6 +700,138 @@ Há dois jeitos de atribuir uma subcategoria a um lançamento:
 
 ---
 
+## ADR-018 — Sugestão de categoria embutida no GET, com 1 query em lote
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+Com a tabela `aprendizados` (ADR-008) alimentada pela categorização, o app pode sugerir a subcategoria de lançamentos ainda não categorizados. Era preciso decidir onde a sugestão aparece e como buscá-la sem degradar o desempenho.
+
+Opções consideradas:
+- **A:** Endpoint separado (`GET /lancamentos/<id>/sugestao`) — o frontend faz 1 chamada por lançamento
+- **B:** Campo embutido em cada lançamento do `GET /lancamentos`, buscado em lote
+- **C:** Campo embutido, mas com 1 query por lançamento (N+1)
+
+### Decisão
+
+**Opção B.** Todo lançamento traz a chave `subcategoria_sugerida`:
+- Sem categoria + padrão aprendido → `{id, nome, categoria_macro_id, categoria_macro_nome, confianca}`
+- Sem categoria + nenhum aprendizado → `null`
+- Já categorizado → `null` (não precisa de sugestão)
+
+A busca é **uma única query** para a lista inteira: os padrões dos lançamentos sem categoria são normalizados, deduplicados e consultados com `WHERE padrao_descricao IN (?, ?, …)`, já com JOIN em `subcategorias` e `categorias_macro` (os nomes vêm na mesma ida ao banco). O resultado vira um dict em memória e é distribuído para os lançamentos.
+
+O mesmo enriquecimento é aplicado nas respostas de lançamento único (POST, PUT, categorizar), para que o lançamento tenha **o mesmo formato em qualquer endpoint**.
+
+### Justificativa
+
+1. **Uma requisição só** para a tela de importação/histórico: o frontend recebe a lista pronta para exibir "sugerido: Equipamento".
+2. **Evita o N+1:** com 1 query por lançamento, um mês com 80 lançamentos faria 80 consultas. Medido nos testes: um GET de 27 lançamentos executa 2 queries no total, 1 em `aprendizados`.
+3. **Chave sempre presente** (mesma convenção dos campos de parcela): o frontend não precisa checar existência, só `null`.
+
+### Trade-offs aceitos
+
+- O GET faz trabalho extra mesmo quando o frontend não exibe sugestões (custo: 1 query).
+- Respostas de lançamento único fazem 1 query extra para manter o formato uniforme.
+- A lista do `IN (...)` cresce com o número de padrões distintos do mês — muito abaixo do limite de variáveis do SQLite (32 766).
+
+### Reabrir se:
+
+- O volume de lançamentos por consulta crescer a ponto de a lista do `IN` pesar (considerar JOIN direto com uma coluna de padrão materializada em `lancamentos`).
+
+---
+
+## ADR-019 — Regras de aprendizado e normalização do padrão
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+O endpoint `POST /lancamentos/<id>/categorizar` (ADR-017) atribui a subcategoria **e** alimenta `aprendizados`. Era preciso definir o que acontece em cada combinação de estado, e consolidar a normalização do padrão prevista na ADR-008.
+
+### Decisão
+
+**1. Normalização do padrão** (`normalizar_padrao`), estendendo a ADR-008:
+- Remove o sufixo `" - Parcela X/Y"` (o que o parser grava, Etapa 2).
+- Remove números **soltos** no final, inclusive com `.` e `,`: regex `(\s+\d[\d.,]*)+\s*$` — `"UBER 12,50"` → `"uber"`. Exigir espaço antes evita cortar `"...SUB 110,00ANTHROPIC.C"`.
+- **Extensão:** junta espaços repetidos e aplica `casefold()` (com normalização Unicode NFC). Só na chave de aprendizado; a descrição do lançamento não muda.
+
+**2. Ações ao categorizar** (`acao` na resposta, em português como o resto da API):
+
+| Situação | `acao` | `confianca` |
+|---|---|---|
+| Padrão sem aprendizado | `criado` | 1 |
+| Aprendizado na **mesma** subcategoria | `reforcado` | +1 |
+| Aprendizado em **outra** subcategoria | `sobrescrito` | volta a 1 |
+| Lançamento **já estava** nessa subcategoria e o aprendizado já aponta para ela | `inalterado` | sem mudança |
+| `subcategoria_id: null` e o aprendizado aponta para a subcategoria **que o lançamento tinha** | `apagado` | null |
+| `subcategoria_id: null` sem aprendizado, ou aprendizado de **outra** subcategoria | `nenhuma` | null |
+
+**3. Implementação atômica:**
+- Criar/reforçar/sobrescrever é **uma única instrução**: `INSERT … ON CONFLICT (padrao_descricao) DO UPDATE SET confianca = CASE WHEN aprendizados.subcategoria_id = excluded.subcategoria_id THEN confianca + 1 ELSE 1 END, …  RETURNING confianca`.
+- Atualizar o lançamento e o aprendizado acontece **numa só transação**: nunca fica um lançamento categorizado sem o aprendizado correspondente, nem o contrário.
+
+### Justificativa
+
+1. **casefold e espaços:** importados vêm sempre em maiúsculas do banco, mas manuais são digitados à mão — sem isso, "Padaria", "padaria" e "Padaria  Central" seriam padrões diferentes. Cumpre o "Reabrir se" da ADR-008 (muitos aprendizados quase iguais).
+2. **`reforcado` / `sobrescrito`:** a confiança mede quantas confirmações seguidas o padrão tem; uma troca de opinião do usuário zera a contagem na nova subcategoria.
+3. **`inalterado`:** clique duplo, ou recategorizar para a mesma subcategoria, não traz informação nova — não deve inflar a confiança. A confiança conta **lançamentos distintos** que confirmam o padrão.
+4. **`apagado` só do que o lançamento alimentou:** descategorizar um lançamento que estava em "Mercado" (por PUT silencioso) não deve apagar um aprendizado "Equipamento" com confiança 5 construído por outros lançamentos.
+5. **Atomicidade:** a mesma filosofia do upsert de tetos (ADR-014) — sem janela entre ler e escrever.
+
+### Trade-offs aceitos
+
+- `casefold()` funde padrões que só diferem em maiúsculas — desejado. Acentos **não** são ignorados ("ACAI" ≠ "AÇAÍ"), mantendo a mesma regra das subcategorias (ADR-012).
+- Um padrão tem uma única subcategoria (UNIQUE em `padrao_descricao`): lojas que vendem de tudo (ex: supermercado com roupas) vão alternar entre `sobrescrito` e confiança baixa.
+- Remover números finais pode juntar lançamentos distintos de uma mesma loja (ex: filiais "LOJA X 01" e "LOJA X 02") — desejado na maioria dos casos.
+
+### Reabrir se:
+
+- Padrões ambíguos (lojas multi-categoria) gerarem sugestões erradas com frequência (considerar várias subcategorias por padrão, com contagem).
+- Surgir necessidade de ignorar acentos também no padrão.
+
+---
+
+## ADR-020 — Sugestão a partir de 1 confirmação (threshold = 1 na v1)
+
+**Data:** 2026-10-21
+**Status:** Decidido
+
+### Contexto
+
+Com a `confianca` registrada por padrão (ADR-019), era preciso decidir a partir de quantas confirmações uma sugestão aparece.
+
+Opções consideradas:
+- **A:** Threshold fixo maior (ex: só sugere com confiança ≥ 3)
+- **B:** Sugerir sempre que o padrão existir (threshold = 1) e deixar o frontend decidir a apresentação pela `confianca`
+- **C:** Auto-categorizar (aplicar sem perguntar) acima de um threshold
+
+### Decisão
+
+**Opção B.** A sugestão aparece sempre que existe aprendizado para o padrão, com a `confianca` no payload. O backend **nunca categoriza sozinho**: a sugestão só vira categoria quando o usuário confirma (via `categorizar`, o que reforça o aprendizado).
+
+### Justificativa
+
+1. **Utilidade imediata:** num app pessoal, a maioria dos padrões aparece poucas vezes por mês; exigir 3 confirmações faria a sugestão demorar meses para surgir.
+2. **Separação de responsabilidades:** o backend informa (`confianca`), o frontend decide a forma (ex: confiança 1 = sugestão discreta; ≥ 3 = destaque com "aceitar" em um toque).
+3. **Sem risco de erro silencioso:** como nada é aplicado automaticamente, uma sugestão errada custa um toque, não um gasto mal categorizado sem o usuário perceber.
+4. **Ajustável sem migração:** mudar o threshold é uma regra no frontend (ou um filtro no backend), sem tocar no banco.
+
+### Trade-offs aceitos
+
+- Sugestões com confiança 1 podem estar erradas (uma categorização atípica vira sugestão). Mitigado pela exibição graduada e pelo `sobrescrito`, que corrige na próxima confirmação diferente.
+- Toda sugestão exige uma ação do usuário — sem auto-categorização na v1.
+
+### Reabrir se:
+
+- Sugestões de confiança baixa gerarem ruído na prática (subir o threshold).
+- O usuário quiser auto-categorização para padrões muito confiáveis (Opção C, com limite alto e possibilidade de desfazer).
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.
