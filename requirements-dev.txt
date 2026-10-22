@@ -1,0 +1,6 @@
+# Dependências de desenvolvimento e testes (ADR-024).
+# Produção usa só o requirements.txt; CI e máquinas de dev instalam este.
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0
+pytest-mock==3.17.0

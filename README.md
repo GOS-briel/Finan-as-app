@@ -1,5 +1,7 @@
 ﻿# Finanças App
 
+[![Testes](https://github.com/GOS-briel/Finan-as-app/actions/workflows/tests.yml/badge.svg)](https://github.com/GOS-briel/Finan-as-app/actions/workflows/tests.yml)
+
 App de controle financeiro pessoal focado em fricção baixa (registrar um gasto em menos de 10 segundos) e controle por tetos macro de categorias.
 
 ## Estado atual
@@ -25,6 +27,7 @@ App de controle financeiro pessoal focado em fricção baixa (registrar um gasto
 - **Leitura de PDF:** pdfplumber
 - **Persistência:** SQLite com `sqlite3` puro, sem ORM (ADR-001, ADR-004)
 - **Frontend:** HTML + CSS + JavaScript (PWA)
+- **Testes:** pytest + pytest-cov; CI no GitHub Actions (Python 3.13)
 
 ## Como rodar (dev)
 
@@ -41,6 +44,24 @@ python backend/main.py
 ```
 
 O banco (`backend/app/db/financas.db`) é criado automaticamente na primeira requisição, com as 8 categorias macro. Para criá-lo manualmente: `python backend/app/db/inicializar.py`. O arquivo fica fora do Git (dados pessoais).
+
+### Testes
+
+```powershell
+# Dependências de teste (uma vez)
+pip install -r requirements-dev.txt
+
+# Suíte completa
+pytest
+
+# Com cobertura (falha abaixo de 80%)
+pytest --cov=backend --cov-report=term-missing
+
+# Incluindo os testes com a fatura real (o PDF não vai para o Git)
+$env:FATURA_PDF_PATH = "caminho\da\fatura.pdf"; pytest
+```
+
+A suíte fica em `tests/` (`unit/`, `integration/`, `e2e/`) e usa sempre um banco SQLite temporário — o `financas.db` real nunca é tocado. Sem `FATURA_PDF_PATH`, os testes com a fatura real são pulados (como no CI). Detalhes na ADR-024.
 
 ## API
 
@@ -85,23 +106,17 @@ Esta seção serve para retomar o projeto rapidamente em sessões futuras sem re
 - ✅ CRUD de lançamentos manuais, com proteção dos importados
 - ✅ Categorização por aprendizado, com sugestões no GET
 - ✅ Dashboard agregado (`GET /dashboard`) — Etapa 10, última do backend v1
-- ❌ **Testes automatizados com pytest** (ver abaixo)
+- ✅ Suíte pytest (330 testes, 99% de cobertura) + CI no GitHub Actions — Etapa 11
 
 **Frontend — não iniciado (começa na Etapa 12):**
 - 4 telas definidas em mockups (Dashboard, Registrar, Histórico, Importar)
 - Não existe código ainda
 
-### ⚠️ Próxima etapa — Etapa 11: testes automatizados (antes do frontend)
+### Próxima etapa — Etapa 12: frontend PWA
 
-Todas as etapas foram testadas (mais de 200 casos), mas com **scripts avulsos**, ainda não com `pytest`. Eles foram preservados sem alteração em [`backend/tests/legado/`](backend/tests/legado/README.md) e rodam um a um com o Python. Falta transformá-los numa suíte única que rode com um comando — senão qualquer mudança no backend, inclusive as que o frontend vai exigir, pode quebrar algo sem aviso.
+As 4 telas dos mockups (Dashboard, Registrar, Histórico, Importar), consumindo a API. Antes da primeira tela que chama a API de outra origem: **configurar CORS** (pendência abaixo).
 
-Plano da etapa:
-- Criar `backend/tests/` com `pytest` (e `pytest` no `requirements.txt`)
-- Fixture com banco SQLite temporário (trocando `inicializar.CAMINHO_BANCO`) + `app.test_client()` do Flask — o padrão já usado nos scripts legados
-- Converter os scripts legados por recurso: parser, importação, categorias, tetos, lançamentos, aprendizados, dashboard
-- O teste com a fatura real depende de um PDF que não pode ir para o Git (dados sensíveis): marcar como opcional (pulado se o arquivo não existir) ou criar um PDF sintético
-
-Depois dela: **Etapa 12 em diante — frontend PWA** (4 telas).
+A suíte de testes (Etapa 11) roda a cada push: qualquer mudança no backend que o frontend exigir é validada pelo CI.
 
 ### Decisões já tomadas
 
@@ -132,10 +147,10 @@ Ver [DECISOES.md](DECISOES.md) (detalhes) e [BACKLOG.md](BACKLOG.md) (features a
 | 021 | Estrutura do dashboard e categoria virtual "Sem categoria" |
 | 022 | Status por threshold (80%) e cálculo do hero |
 | 023 | Ordenação do breakdown por status |
+| 024 | Testes com pytest, cobertura mínima de 80% e CI no GitHub Actions |
 
 ### Pendências técnicas identificadas
 
-- **Testes automatizados com pytest** — Etapa 11, acima
 - **CORS** — obrigatório antes do frontend consumir a API de outra origem
 - **MAX_CONTENT_LENGTH** — limitar o tamanho do upload da fatura
 - **Fuso horário** — TODO no `main.py`: usar `ZoneInfo("America/Sao_Paulo")` ao hospedar (ADR-015)
@@ -147,6 +162,7 @@ Ver [DECISOES.md](DECISOES.md) (detalhes) e [BACKLOG.md](BACKLOG.md) (features a
 - Máquina principal: `D:\financas-app` (Python 3.13.15)
 - Máquina trabalho: `C:\Users\br0098346777\Documents\Finan-as-app` (Python 3.14)
 - Ambas sincronizadas via GitHub — sempre `git pull` antes de nova sessão
+- Local pode ser Python 3.13 ou mais novo; o CI usa 3.13 (o menor suportado). Em cada máquina: `pip install -r requirements-dev.txt` para rodar os testes
 - O `financas.db` não vai pelo Git: em cada máquina, ele é criado na primeira execução
 
 ### Fatura de referência para testes

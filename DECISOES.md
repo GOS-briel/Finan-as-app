@@ -866,11 +866,11 @@ A tela principal do app responde "estou no controle este mês?". Ela precisa de 
 
 ### Desempenho
 
-Cerca de 20 queries por chamada (medido: 20 SELECTs): 1 agregada para gasto/quantidade por macro, 17 para tetos efetivos (reaproveitando `tetos.listar_tetos`, que calcula a herança da ADR-013 com 2 queries por macro) e 2 para os últimos lançamentos. Aceitável: é uma chamada por tela, num SQLite local, e não um N+1 por item. Reaproveitar `listar_tetos` mantém a regra de herança num único lugar.
+**De 15 a 20 SELECTs** por chamada: 1 agregada para gasto/quantidade por macro; 1 + 1 ou 2 por macro para os tetos efetivos (reaproveitando `tetos.listar_tetos`: 1 se a macro tem teto próprio no mês, 2 se precisa buscar a herança da ADR-013); 1 para os últimos lançamentos e 1 para as sugestões (só se houver lançamento sem categoria). **Máximo de 20**, quando todos os tetos são herdados (medido nos testes da ADR-024). Aceitável: é uma chamada por tela, num SQLite local, e não um N+1 por item. Reaproveitar `listar_tetos` mantém a regra de herança num único lugar.
 
 ### Trade-offs aceitos
 
-- ~20 queries quando uma versão dedicada faria ~4.
+- Até 20 queries quando uma versão dedicada faria ~4.
 - A lista inline dos lançamentos sem categoria (alternativa "D3") ficou de fora: o dashboard traz só contagem e valor; a lista vem de `GET /lancamentos?sem_categoria=true`.
 - "Hoje" é o relógio do servidor (mesmo TODO de fuso da ADR-015).
 
@@ -971,6 +971,66 @@ Empates de percentual são desempatados pelo id da macro (ordem determinística)
 ### Reabrir se:
 
 - O usuário preferir posição fixa no dashboard (oferecer as duas ordens, com a escolha no frontend).
+
+---
+
+## ADR-024 — Testes automatizados: pytest, cobertura mínima e CI
+
+**Data:** 2026-10-22
+**Status:** Decidido
+
+### Contexto
+
+Até a Etapa 10, cada etapa foi validada com scripts avulsos (mais de 200 verificações), executados um a um e guardados em `backend/tests/legado/`. Não havia um comando único para rodar tudo, nem execução automática: qualquer mudança no backend — inclusive as que o frontend vai exigir — podia quebrar algo sem aviso.
+
+### Decisões
+
+**1. Framework: pytest** (+ `pytest-cov` para cobertura e `pytest-mock` para simular dependências). É o padrão de fato em Python: fixtures, parametrização e relatórios legíveis.
+
+**2. Localização e organização: `tests/` na raiz**, separado do código de produção:
+
+| Pasta | O que testa |
+|---|---|
+| `tests/unit/` | Funções puras: parser (com `pdfplumber` simulado), normalização do padrão, validadores, regras do dashboard e das categorias |
+| `tests/integration/` | Um arquivo por recurso: schema, importação, categorias, tetos, lançamentos, aprendizados, dashboard — módulos de `app/db/` e endpoints via `test_client` |
+| `tests/e2e/` | Fluxos de vários passos: importar → categorizar → sugerir → reimportar → dashboard |
+
+Configuração em `pyproject.toml` (`pythonpath = ["backend"]`, `--import-mode=importlib`, `--strict-markers`). Dependências de teste em `requirements-dev.txt` (`-r requirements.txt` + ferramentas), para o deploy da API não instalá-las.
+
+**3. Isolamento e determinismo (fixtures em `tests/conftest.py`):**
+- **Banco temporário em todo teste que toca dados:** `monkeypatch` em `inicializar.CAMINHO_BANCO`. Funciona porque todo acesso passa por `conectar()`, que lê o atributo na hora da chamada — nenhum módulo importa o caminho diretamente. O `financas.db` real nunca é aberto.
+- **"Hoje" congelado em 2026-10-22** (`hoje_fixo`, automática): a janela de 90 dias (ADR-015) e os dias restantes (ADR-021) não quebram quando o mês vira.
+- **Pasta temporária vigiada** (`pasta_temp_monitorada`, automática): o upload do PDF é gravado numa pasta do teste; se sobrar algum `.pdf`, o teste falha.
+- **Factory de lançamentos** (`lancamento_manual`) que grava direto no banco, inclusive com `origem="fatura"` e datas fora da janela — os testes de lançamentos e aprendizados não dependem do PDF.
+
+**4. A fatura real fica fora do Git e do CI.** O PDF tem dados sensíveis. Testes que o usam recebem a fixture `fatura_teste`, que lê `FATURA_PDF_PATH` e **pula o teste** se a variável não existir; esses testes ganham automaticamente o marcador `fatura_real`. O parser continua coberto no CI pelos testes unitários com `pdfplumber` simulado. Uma fatura sintética (mock do layout Bradesco) ficou como ideia para etapa futura.
+
+**5. Convenções:** todo teste tem uma docstring de 1 linha descrevendo o cenário (aparece no relatório de falha); fronteiras e listas de entradas inválidas usam `@pytest.mark.parametrize`, com `ids` legíveis.
+
+**6. Cobertura mínima de 80%** (`fail_under` no `pyproject.toml`), com o relatório listando as linhas descobertas. Na migração: **98,93%** (748 instruções, 8 descobertas — todas proteções contra concorrência, como `UNIQUE` disparado depois da checagem em Python).
+
+**7. CI no GitHub Actions** (`.github/workflows/tests.yml`): a cada push (qualquer branch) e pull request, em `ubuntu-latest` com **Python 3.13** — o menor suportado, alinhado com a máquina principal; o desenvolvimento local pode usar 3.13 ou mais novo. Instala `requirements-dev.txt` e roda `pytest --cov`; o job falha se algum teste falhar ou se a cobertura ficar abaixo de 80%.
+
+**8. Migração completa e remoção dos legados.** Todos os scripts de `backend/tests/legado/` foram portados (330 testes no total; 318 rodam no CI, 12 dependem da fatura real) e a pasta foi apagada, para ninguém rodar a versão antiga por engano.
+
+### Justificativa
+
+1. **Um comando** (`pytest`) valida o backend inteiro em ~1 minuto, localmente e no CI.
+2. **Isolamento total** (banco e pasta temporários, data congelada): os testes são repetíveis, não dependem da máquina nem do dia, e nunca tocam dados pessoais.
+3. **80% é piso, não meta:** evita regressão de cobertura sem incentivar testes artificiais; as 8 linhas descobertas exigiriam simular corridas.
+4. **CI em toda branch:** permite validar uma mudança numa branch antes de levá-la à `main` — foi assim que esta própria etapa foi validada.
+
+### Trade-offs aceitos
+
+- O CI não exercita o PDF real: uma mudança de layout do Bradesco só é pega pelos testes `fatura_real` na máquina do dev (e pelo `total_confere` em produção, ADR-009).
+- O Python mais novo (3.14) não roda no CI; só a máquina do trabalho o usa.
+- A data congelada não testa o "hoje" de verdade — a lógica de data é testada com datas explícitas.
+
+### Reabrir se:
+
+- O layout da fatura mudar ou surgir outro banco (criar a fatura sintética para o CI).
+- O frontend ganhar testes próprios (decidir se entram neste workflow ou num separado).
+- O tempo da suíte passar de alguns minutos (separar testes lentos com marcador).
 
 ---
 

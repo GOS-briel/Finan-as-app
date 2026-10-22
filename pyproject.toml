@@ -1,0 +1,23 @@
+# Configuração de testes e cobertura (ADR-024).
+# O projeto não é um pacote instalável: este arquivo só configura ferramentas.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# O backend importa "app...." com backend/ no sys.path (como em python backend/main.py)
+pythonpath = ["backend"]
+# importlib: permite arquivos de teste com o mesmo nome em pastas diferentes
+addopts = "-ra --strict-markers --import-mode=importlib"
+markers = [
+    "fatura_real: usa o PDF real da fatura (variável FATURA_PDF_PATH); pulado se ela não estiver definida, como no CI",
+]
+
+[tool.coverage.run]
+source = ["backend"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+# Blocos de execução direta (python arquivo.py) não rodam nos testes
+exclude_also = [
+    'if __name__ == "__main__":',
+]

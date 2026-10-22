@@ -8,6 +8,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Testes e cobertura
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Distribuição / build
 build/
 dist/
