@@ -45,3 +45,6 @@ faturas/
 
 # Configuração local do Claude Code (específica da máquina)
 .claude/
+
+# Marcador de retomada: notas locais de sessao (nao publicar)
+RETOMADA.md
