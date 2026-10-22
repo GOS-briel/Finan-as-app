@@ -1,8 +1,8 @@
-# Testes legados (Etapas 5 a 9)
+# Testes legados (Etapas 5 a 10)
 
-Scripts de teste usados durante o desenvolvimento das Etapas 5.2 a 9, preservados **sem alteração**. Ainda **não são pytest**: cada um é executado direto com o Python e imprime `OK`/`FALHOU` por caso, terminando com `falhas: N`.
+Scripts de teste usados durante o desenvolvimento das Etapas 5.2 a 10, preservados **sem alteração** (o da Etapa 10 já nasceu aqui). Ainda **não são pytest**: cada um é executado direto com o Python e imprime `OK`/`FALHOU` por caso, terminando com `falhas: N`.
 
-Servem de base para a **Etapa 10** (ver marcador de retomada no README da raiz): converter para `pytest` em `backend/tests/`, um arquivo por recurso. Depois da conversão, esta pasta pode ser apagada.
+Servem de base para a **Etapa 11** (ver marcador de retomada no README da raiz): converter para `pytest` em `backend/tests/`, um arquivo por recurso. Depois da conversão, esta pasta pode ser apagada.
 
 ## Como rodar
 
@@ -15,6 +15,7 @@ python backend/tests/legado/testar_categorias.py backend
 python backend/tests/legado/testar_tetos.py backend
 python backend/tests/legado/testar_lancamentos.py backend $pdf
 python backend/tests/legado/testar_aprendizados.py backend $pdf
+python backend/tests/legado/testar_dashboard.py backend $pdf
 python backend/tests/legado/testar_422_e_cafes.py backend $pdf
 python backend/tests/legado/regressao_importar.py backend $pdf
 python backend/tests/legado/regressao_competencia_form.py backend $pdf
@@ -35,6 +36,7 @@ Esses usam um **banco temporário** (trocam `inicializar.CAMINHO_BANCO`) e o `ap
 | `testar_tetos.py` | 7 | CRUD de tetos, herança do mês anterior, upsert |
 | `testar_lancamentos.py` | 8 | CRUD de lançamentos, janela de 90 dias, proteção de importados, comparação com o valor atual |
 | `testar_aprendizados.py` | 9 | Normalização do padrão, ciclo de aprendizado, sugestões em 1 query, filtro `sem_categoria` |
+| `testar_dashboard.py` | 10 | Hero, status por threshold (fronteiras), ordenação do breakdown, "Sem categoria", dias restantes, últimos lançamentos, contagem de queries |
 
 Auxiliares (usados nos testes da Etapa 5.3 feitos com o servidor rodando e `curl`):
 - `resumo_resposta.py <arquivo.json>` — resume uma resposta de `/fatura/importar`

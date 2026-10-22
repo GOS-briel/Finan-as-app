@@ -832,6 +832,148 @@ Opções consideradas:
 
 ---
 
+## ADR-021 — Dashboard agregado e categoria virtual "Sem categoria"
+
+**Data:** 2026-10-22
+**Status:** Decidido
+
+### Contexto
+
+A tela principal do app responde "estou no controle este mês?". Ela precisa de total gasto, orçamento, situação de cada categoria e os lançamentos recentes. Montar isso no frontend exigiria várias chamadas (lançamentos, tetos, categorias) e duplicaria regras de cálculo no cliente.
+
+### Decisão
+
+**Um endpoint agregado, `GET /dashboard?mes=&ano=`**, que devolve tudo calculado:
+
+- `dias_restantes_no_mes` — mês passado: 0; mês atual: último dia − hoje (sem contar hoje); mês futuro: o mês inteiro.
+- `hero` — total do mês vs orçamento (cálculo na ADR-022).
+- `quantidade_sem_categoria` / `valor_sem_categoria` — atalho para o aviso "X lançamentos para categorizar".
+- `categorias` — breakdown com **9 itens sempre**: as 8 macro + a categoria **virtual** "Sem categoria".
+- `ultimos_lancamentos` — os 3 mais recentes, no mesmo formato do `GET /lancamentos` (JOIN + sugestão), ordenados por data, `criado_em` e id (DESC).
+
+**Formato uniforme dos itens:** todos têm as mesmas chaves — `categoria_macro`, `categoria_virtual_nome`, `gasto`, `quantidade`, `teto`, `percentual`, `status`, `diferenca` (`teto − gasto`: positivo sobrou, negativo estourou), `convite_definir_teto`.
+- Macro reais: `categoria_virtual_nome: null`; `convite_definir_teto: true` só quando não há teto (nem herdado).
+- "Sem categoria": `categoria_macro: null`, `categoria_virtual_nome: "Sem categoria"`, `status: "sem_teto"`, `convite_definir_teto: false` (não é possível definir teto para ela). **Sempre presente**, mesmo com gasto 0 e quantidade 0.
+- Macro sem lançamentos no mês aparecem com `gasto: 0` e `quantidade: 0`.
+
+**"Sem categoria" é virtual:** não existe em `categorias_macro`; é montada em memória a partir da linha `NULL` do `GROUP BY`.
+
+### Justificativa
+
+1. **Uma requisição por tela**, com os números já consistentes entre si (o frontend não faz conta e não diverge).
+2. **"Sem categoria" no breakdown:** o hero mostra o total real (tudo que saiu); sem a categoria virtual, a soma das barras não fecharia com o total, e o usuário não veria quanto ainda falta categorizar. Virtual, e não uma 9ª macro, para não violar a ADR-005 (8 macro fixas) nem aceitar teto.
+3. **Formato fixo e item sempre presente:** o frontend renderiza sem `if` de existência — uniformidade vale mais que economizar um item vazio.
+
+### Desempenho
+
+Cerca de 20 queries por chamada (medido: 20 SELECTs): 1 agregada para gasto/quantidade por macro, 17 para tetos efetivos (reaproveitando `tetos.listar_tetos`, que calcula a herança da ADR-013 com 2 queries por macro) e 2 para os últimos lançamentos. Aceitável: é uma chamada por tela, num SQLite local, e não um N+1 por item. Reaproveitar `listar_tetos` mantém a regra de herança num único lugar.
+
+### Trade-offs aceitos
+
+- ~20 queries quando uma versão dedicada faria ~4.
+- A lista inline dos lançamentos sem categoria (alternativa "D3") ficou de fora: o dashboard traz só contagem e valor; a lista vem de `GET /lancamentos?sem_categoria=true`.
+- "Hoje" é o relógio do servidor (mesmo TODO de fuso da ADR-015).
+
+### Reabrir se:
+
+- O dashboard ficar lento (otimizar `listar_tetos` para uma query única com window function).
+- O frontend precisar da lista de não categorizados no próprio dashboard (opção D3).
+
+---
+
+## ADR-022 — Status por threshold e cálculo do hero
+
+**Data:** 2026-10-22
+**Status:** Decidido
+
+### Contexto
+
+Cada categoria (e o hero) precisa de um status visual simples. E o hero tem uma armadilha: o total gasto inclui categorias sem teto, mas o orçamento só soma os tetos existentes — dividir um pelo outro mistura grandezas diferentes (ex: só Alimentação com teto de 800 e R$ 1.699 gastos no total daria "212% estourado", com Alimentação dentro do teto).
+
+### Decisão
+
+**1. Status de uma categoria** (`classificar(gasto, teto)`), com `THRESHOLD_QUASE_NO_TETO = 0.80` no topo de `dashboard.py`:
+
+| Situação | `status` | `percentual` |
+|---|---|---|
+| teto `null` (nem definido nem herdado) | `sem_teto` | `null` |
+| teto `0` e gasto `0` | `folgado` | `0` |
+| teto `0` e gasto `> 0` | `estourado` | `null` (seria infinito) |
+| gasto/teto `> 1` | `estourado` | gasto/teto × 100 |
+| `0,80 ≤` gasto/teto `≤ 1` | `quase_no_teto` | idem |
+| gasto/teto `< 0,80` | `folgado` | idem |
+
+O status usa a razão **sem arredondar**; o `percentual` (2 casas) é só exibição. Assim, 100,004% é `estourado` mesmo aparecendo como `100.0`. Exatamente 100% é `quase_no_teto` (gastou tudo, mas não passou).
+
+**2. Cálculo do hero (fluxo):**
+
+1. `total_gasto` = soma de **todos** os lançamentos do mês (tudo que saiu, inclusive sem categoria)
+2. `gasto_com_teto` = soma do gasto **só das macro com teto** (definido ou herdado; teto 0 conta)
+3. `total_teto` = soma **só dos tetos existentes** (definidos ou herdados)
+4. `gasto_sem_teto` = `total_gasto − gasto_com_teto` (macro sem teto + "Sem categoria")
+5. **SE** `total_teto == 0`: `percentual_uso = null`, `status = "sem_teto"`
+6. **SENÃO**: `percentual_uso = gasto_com_teto / total_teto × 100`, `status` pela mesma regra do item 1
+
+Todos os valores em reais são arredondados a 2 casas; `gasto_sem_teto` é calculado no backend para o frontend não precisar derivá-lo (e divergir).
+
+### Justificativa
+
+1. **80%** dá tempo de reagir antes de estourar; constante nomeada para ajustar com o uso.
+2. **Comparar só o comparável:** `percentual_uso` relaciona o gasto que *tem* orçamento com o orçamento — o indicador continua honesto mesmo com tetos incompletos. O total real continua visível em `total_gasto`, e o que está fora do orçamento, em `gasto_sem_teto`.
+3. **Teto 0** é uma decisão válida ("não gastar nada", ADR-013): sem gasto está ok; qualquer gasto é estouro, sem percentual infinito no JSON.
+4. **Razão sem arredondar** evita status incoerente com o valor real nas fronteiras.
+
+### Trade-offs aceitos
+
+- **O hero agrega e pode esconder um estouro:** com Alimentação em 204% e outras macro com teto sobrando, o hero mostra ~94% (`quase_no_teto`). O breakdown (ordenado pela ADR-023, estourados primeiro) é onde o estouro aparece; o frontend deve exibir os dois.
+- Se todos os tetos definidos forem 0, `total_teto == 0` e o hero fica `sem_teto`, mesmo havendo decisão explícita de "não gastar" — caso raro, aceito pela simplicidade do fluxo.
+
+### Reabrir se:
+
+- O usuário achar 80% cedo ou tarde demais (ajustar a constante).
+- O hero esconder estouros na prática (considerar status do hero = pior status entre as categorias).
+
+---
+
+## ADR-023 — Ordenação do breakdown por status
+
+**Data:** 2026-10-22
+**Status:** Decidido
+
+### Contexto
+
+O breakdown tem 9 itens. A ordem canônica (ADR-005) é estável, mas não responde "o que precisa da minha atenção agora?".
+
+### Decisão
+
+Ordenar por grupo de status e, dentro dele, por urgência:
+
+1. **`estourado`** — percentual DESC (teto 0 com gasto, percentual `null`, conta como infinito e vem primeiro)
+2. **`quase_no_teto`** — percentual DESC
+3. **`folgado`** — percentual DESC (o menos folgado primeiro, perto dos "quase")
+4. **`sem_teto`** — por `categoria_macro.id` (ordem canônica da ADR-005)
+5. **"Sem categoria"** — sempre o último item
+
+Empates de percentual são desempatados pelo id da macro (ordem determinística).
+
+### Justificativa
+
+1. **Atenção primeiro:** o que estourou ou está perto aparece no topo, sem o usuário procurar.
+2. **Folgados em DESC** formam uma gradação contínua a partir dos "quase" — o próximo a virar problema fica logo abaixo deles.
+3. **`sem_teto` no fim**, com o convite para definir teto (`convite_definir_teto`): é configuração pendente, não alerta.
+4. **"Sem categoria" por último:** não é uma categoria de orçamento, é um lembrete de trabalho pendente.
+5. **Ordem determinística** (desempate por id): a lista não "pula" entre recarregamentos com valores iguais.
+
+### Trade-offs aceitos
+
+- A posição de cada macro muda ao longo do mês conforme o gasto — o usuário não decora "Lazer é a 2ª linha". Para quem prefere posição fixa, a ordem canônica fica disponível em `GET /tetos` e `GET /categorias/macro`.
+
+### Reabrir se:
+
+- O usuário preferir posição fixa no dashboard (oferecer as duas ordens, com a escolha no frontend).
+
+---
+
 ## Convenções deste arquivo
 
 - Decisões reabertas viram ADR-NNN-v2 com link pra versão anterior.

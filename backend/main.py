@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from flask import Flask, jsonify, request
 
-from app.db import categorias, inicializar, lancamentos, tetos
+from app.db import categorias, dashboard, inicializar, lancamentos, tetos
 from app.fatura.leitor import (
     extrair_competencia,
     extrair_lancamentos,
@@ -440,6 +440,15 @@ def apagar_lancamento(lancamento_id):
     except lancamentos.LancamentoNaoEncontrado:
         return jsonify({"erro": "lancamento nao encontrado"}), 404
     return "", 204
+
+
+@app.route("/dashboard")
+def obter_dashboard():
+    try:
+        mes, ano = _validar_mes_ano(request.args)
+    except ValueError as erro:
+        return jsonify({"erro": str(erro)}), 400
+    return jsonify(dashboard.montar_dashboard(mes, ano, date.today()))
 
 
 if __name__ == "__main__":

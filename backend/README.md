@@ -32,6 +32,7 @@ backend/
         ├── categorias.py   # Macro (leitura) e subcategorias (CRUD)
         ├── tetos.py        # Tetos por mês com herança
         ├── aprendizados.py # Normalização do padrão, sugestões e regras de aprendizado
+        ├── dashboard.py    # Agregação do mês: hero, breakdown por status, últimos lançamentos
         └── financas.db     # Banco local (fora do Git)
 ```
 

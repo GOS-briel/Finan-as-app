@@ -156,14 +156,20 @@ def _garantir_subcategoria(conexao, subcategoria_id: int) -> None:
         raise SubcategoriaNaoEncontrada()
 
 
+def intervalo_do_mes(mes: int, ano: int) -> tuple[str, str]:
+    """("2026-10-01", "2026-11-01"): filtro "data >= inicio AND data < fim"."""
+    inicio = f"{ano:04d}-{mes:02d}-01"
+    fim = f"{ano + 1:04d}-01-01" if mes == 12 else f"{ano:04d}-{mes + 1:02d}-01"
+    return inicio, fim
+
+
 def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None,
                        origem: str | None = None, sem_categoria: bool = False) -> list[dict]:
     """
     Lançamentos do mês/ano, mais recentes primeiro, com sugestão de
     subcategoria para os não categorizados. Filtros opcionais.
     """
-    inicio = f"{ano:04d}-{mes:02d}-01"
-    fim = f"{ano + 1:04d}-01-01" if mes == 12 else f"{ano:04d}-{mes + 1:02d}-01"
+    inicio, fim = intervalo_do_mes(mes, ano)
     condicoes, parametros = ["l.data >= ?", "l.data < ?"], [inicio, fim]
     if categoria_macro_id is not None:
         condicoes.append("m.id = ?")
@@ -180,6 +186,26 @@ def listar_lancamentos(mes: int, ano: int, categoria_macro_id: int | None = None
             SQL_SELECIONAR + " WHERE " + " AND ".join(condicoes)
             + " ORDER BY l.data DESC, l.id DESC",
             parametros,
+        ).fetchall()
+        return _enriquecer_com_sugestoes(conexao, [dict(linha) for linha in linhas])
+    finally:
+        conexao.close()
+
+
+def ultimos_lancamentos(mes: int, ano: int, limite: int = 3) -> list[dict]:
+    """
+    Os mais recentes do mês, no mesmo formato do GET /lancamentos.
+    id DESC desempata: importados da mesma fatura têm a mesma data e o
+    mesmo criado_em (gravados no mesmo segundo).
+    """
+    inicio, fim = intervalo_do_mes(mes, ano)
+    conexao = _conectar_com_dicts()
+    try:
+        linhas = conexao.execute(
+            SQL_SELECIONAR
+            + " WHERE l.data >= ? AND l.data < ?"
+            + " ORDER BY l.data DESC, l.criado_em DESC, l.id DESC LIMIT ?",
+            (inicio, fim, limite),
         ).fetchall()
         return _enriquecer_com_sugestoes(conexao, [dict(linha) for linha in linhas])
     finally:

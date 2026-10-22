@@ -62,6 +62,7 @@ Todas as respostas são JSON; erros vêm como `{"erro": "..."}`. Corpos aceitam 
 | PUT | `/lancamentos/<id>` | Edita; importados só aceitam `subcategoria_id` e `nota` | 016, 017 |
 | DELETE | `/lancamentos/<id>` | Apaga definitivamente | 016 |
 | POST | `/lancamentos/<id>/categorizar` | Categoriza **e** ensina o app (ou descategoriza com `null`) | 017, 019, 020 |
+| GET | `/dashboard?mes=&ano=` | Visão do mês: hero (gasto vs orçamento), breakdown das 8 macro + "Sem categoria", últimos 3 lançamentos | 021, 022, 023 |
 
 ## Autor
 
@@ -75,7 +76,7 @@ Esta seção serve para retomar o projeto rapidamente em sessões futuras sem re
 
 ### Status atual
 
-**Backend — v1 completo:**
+**Backend — v1 completo (Etapas 1 a 10):**
 - ✅ Parser Bradesco (extração, parcelas, competência pelo vencimento, conferência do total)
 - ✅ Importação da fatura gravando no SQLite, com deduplicação por contagem
 - ✅ Schema SQLite (5 tabelas) com foreign keys e CHECKs
@@ -83,23 +84,24 @@ Esta seção serve para retomar o projeto rapidamente em sessões futuras sem re
 - ✅ CRUD de tetos com herança automática do mês anterior
 - ✅ CRUD de lançamentos manuais, com proteção dos importados
 - ✅ Categorização por aprendizado, com sugestões no GET
-- ❌ **Testes automatizados versionados no repositório** (ver abaixo)
+- ✅ Dashboard agregado (`GET /dashboard`) — Etapa 10, última do backend v1
+- ❌ **Testes automatizados com pytest** (ver abaixo)
 
-**Frontend — não iniciado:**
+**Frontend — não iniciado (começa na Etapa 12):**
 - 4 telas definidas em mockups (Dashboard, Registrar, Histórico, Importar)
 - Não existe código ainda
 
-### ⚠️ Próxima etapa — Etapa 10: testes automatizados (antes do frontend)
+### ⚠️ Próxima etapa — Etapa 11: testes automatizados (antes do frontend)
 
-Todas as etapas foram testadas (mais de 150 casos), mas **com scripts que ficaram fora do repositório** (pasta temporária da sessão). Hoje o repo não consegue reproduzir essas verificações, e qualquer mudança no backend — inclusive as que o frontend vai exigir — pode quebrar algo sem aviso.
+Todas as etapas foram testadas (mais de 200 casos), mas com **scripts avulsos**, ainda não com `pytest`. Eles foram preservados sem alteração em [`backend/tests/legado/`](backend/tests/legado/README.md) e rodam um a um com o Python. Falta transformá-los numa suíte única que rode com um comando — senão qualquer mudança no backend, inclusive as que o frontend vai exigir, pode quebrar algo sem aviso.
 
 Plano da etapa:
 - Criar `backend/tests/` com `pytest` (e `pytest` no `requirements.txt`)
-- Fixture com banco SQLite temporário (trocando `inicializar.CAMINHO_BANCO`) + `app.test_client()` do Flask — o padrão já usado nas Etapas 6 a 9
-- Portar os casos por recurso: parser, importação, categorias, tetos, lançamentos, aprendizados
+- Fixture com banco SQLite temporário (trocando `inicializar.CAMINHO_BANCO`) + `app.test_client()` do Flask — o padrão já usado nos scripts legados
+- Converter os scripts legados por recurso: parser, importação, categorias, tetos, lançamentos, aprendizados, dashboard
 - O teste com a fatura real depende de um PDF que não pode ir para o Git (dados sensíveis): marcar como opcional (pulado se o arquivo não existir) ou criar um PDF sintético
 
-Depois dela: **frontend PWA** (4 telas).
+Depois dela: **Etapa 12 em diante — frontend PWA** (4 telas).
 
 ### Decisões já tomadas
 
@@ -127,10 +129,13 @@ Ver [DECISOES.md](DECISOES.md) (detalhes) e [BACKLOG.md](BACKLOG.md) (features a
 | 018 | Sugestão embutida no GET, 1 query em lote |
 | 019 | Regras de aprendizado (criado/reforçado/sobrescrito/apagado/...) |
 | 020 | Sugestão a partir de 1 confirmação |
+| 021 | Estrutura do dashboard e categoria virtual "Sem categoria" |
+| 022 | Status por threshold (80%) e cálculo do hero |
+| 023 | Ordenação do breakdown por status |
 
 ### Pendências técnicas identificadas
 
-- **Testes automatizados no repositório** — Etapa 10, acima
+- **Testes automatizados com pytest** — Etapa 11, acima
 - **CORS** — obrigatório antes do frontend consumir a API de outra origem
 - **MAX_CONTENT_LENGTH** — limitar o tamanho do upload da fatura
 - **Fuso horário** — TODO no `main.py`: usar `ZoneInfo("America/Sao_Paulo")` ao hospedar (ADR-015)
